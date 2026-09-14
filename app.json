@@ -1,25 +1,45 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "Done Yet?",
+    "slug": "done-yet",
+    "scheme": "doneyet",
+    "description": "A local-first accountability app that turns intentions into small, finishable steps.",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/icon-brand.png",
+    "userInterfaceStyle": "dark",
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.doneyet.app"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#101410",
+        "foregroundImage": "./assets/android-icon-foreground-brand.png",
+        "monochromeImage": "./assets/android-icon-foreground-brand.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.doneyet.app",
+      "allowBackup": false
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    }
+    "plugins": [
+      "expo-sqlite",
+      "@react-native-community/datetimepicker",
+      "expo-sharing",
+      "expo-secure-store",
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/android-icon-foreground-brand.png",
+          "color": "#D4F887",
+          "defaultChannel": "accountability"
+        }
+      ]
+    ]
   }
 }
