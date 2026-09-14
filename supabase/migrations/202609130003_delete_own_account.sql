@@ -23,6 +23,12 @@ as $$
 declare
   caller_id uuid := auth.uid();
 begin
+  -- Attachments are NOT removed here. Supabase blocks direct deletes on storage.objects
+  -- (SQLSTATE 42501, "Direct deletion from storage tables is not allowed") precisely because
+  -- dropping the metadata row would strand the stored bytes outside Postgres. The app
+  -- therefore deletes each object through the Storage API before calling this function;
+  -- see deleteAccount in mobile/src/cloud/useCloudSync.ts. app_states still cascades from
+  -- auth.users, so the snapshot goes with the account automatically.
   -- No authenticated session: nothing to do. A SECURITY DEFINER function
   -- silently no-oping here (rather than raising) means an accidental or
   -- retried call from a signed-out state cannot be mistaken for a partial
@@ -35,19 +41,6 @@ begin
   -- never cascades — unlike public.app_states, whose owner_id column is
   -- declared `references auth.users(id) on delete cascade` (see
   -- 202609130001_app_states.sql). Without this, deleting the auth.users row
-  -- NOTE: deleting these rows removes only Storage's metadata, not the stored bytes,
-  -- which the storage service holds outside Postgres. The app deletes the real objects
-  -- through the Storage API before calling this function; this delete is the backstop
-  -- that keeps storage.objects from retaining rows for a user who no longer exists.
-  -- Without it the cascade below would leave every attachment this user uploaded as orphaned
-  -- bytes in the private `attachments` bucket, unreachable by any policy
-  -- (202609130002_attachment_objects.sql) but never freed. Delete them first,
-  -- keyed by the same (storage.foldername(name))[1] = uid convention the
-  -- attachments RLS policies use, so this stays the single definition of
-  -- "which objects belong to this user".
-  delete from storage.objects
-  where bucket_id = 'attachments'
-    and (storage.foldername(name))[1] = caller_id::text;
 
   -- Deleting the auth.users row cascades to public.app_states automatically
   -- (its owner_id foreign key is `on delete cascade`), and to any future

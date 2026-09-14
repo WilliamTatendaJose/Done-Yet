@@ -9,6 +9,7 @@ import { useAppClock } from '../hooks/useAppClock';
 import { useInAppReminder } from '../features/reminders/useInAppReminder';
 import { useEscalationSuggestions } from '../features/escalation/useEscalationSuggestions';
 import { useCloudSync } from '../cloud/useCloudSync';
+import { useAiAssist } from '../cloud/useAiAssist';
 import { InAppReminder } from '../features/reminders/InAppReminder';
 import { EntityEditorModal, type EditorSelection } from '../features/editor/EntityEditorModal';
 import { FocusModal } from '../features/focus/FocusModal';
@@ -34,6 +35,7 @@ export function MobileApp() {
   const now = useAppClock(30_000);
   const notifications = useNotifications(state, dispatch, () => setTab('Projects'), () => setTab('Coach'));
   const cloud = useCloudSync(state, dispatch, replaceRemote);
+  const ai = useAiAssist(state, cloud.signedIn, cloud.token);
   const escalationSuggestions = useEscalationSuggestions(state, now, dispatch);
   const openTasks = useMemo(() => state?.tasks.filter(task => task.status === 'todo') ?? [], [state?.tasks]);
   const completedTasks = useMemo(() => state?.tasks.filter(task => task.status === 'done') ?? [], [state?.tasks]);
@@ -97,15 +99,18 @@ export function MobileApp() {
         onEditProject={openProjectEditor}
         onProgressChange={(id, progress) => run({ type: 'progress', id, progress })}
         onAddProject={() => openProjectEditor()}
+        ai={ai}
       /> : null}
       {tab === 'Coach' ? <CoachScreen
         personality={state.settings.personality}
         nextTask={nextTask}
         tasks={state.tasks}
         projects={state.projects}
+        openTasks={openTasks}
         now={now}
         onStartFocus={id => run({ type: 'startFocus', id })}
         onAddTask={() => openTaskEditor()}
+        ai={ai}
       /> : null}
       {tab === 'Settings' ? <SettingsScreen
         state={state}
@@ -124,9 +129,11 @@ export function MobileApp() {
       state={state}
       saving={saving}
       error={error}
+      now={now}
       dispatch={dispatch}
       onClose={() => setEditor(null)}
       attachmentSync={{ enqueueUpload: cloud.enqueueAttachmentUpload, enqueueDelete: cloud.enqueueAttachmentDelete, download: cloud.downloadAttachment }}
+      ai={ai}
     />
     <FocusModal session={state.focus} task={focusTask} error={error} dispatch={dispatch} navigate={setTab} />
     {celebration ? <Confetti variant={celebration.variant} message={celebration.badge?.title} onDone={clearCelebration} /> : null}

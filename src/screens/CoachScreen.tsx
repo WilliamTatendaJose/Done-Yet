@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { getCoachingAdvice } from '../../../src/domain/engine';
 import { badges, type Badge } from '../../../src/domain/badges';
@@ -11,6 +11,7 @@ import {
   type ReminderEffectiveness,
 } from '../../../src/domain/insights';
 import type { Blocker, Personality, Project, Task } from '../../../src/domain/types';
+import type { AiAssistState } from '../cloud/useAiAssist';
 import { Button, Choice } from '../components/ui';
 import { colors, radii, spacing } from '../theme';
 
@@ -26,9 +27,12 @@ interface Props {
   nextTask?: Task;
   tasks: Task[];
   projects: Project[];
+  /** Open (not-yet-done) tasks, used only to build the minimised daily-plan request — see domain/aiPayload.ts's buildPayload, which reads just each task's title and dueAt. */
+  openTasks: Task[];
   now: number;
   onStartFocus: (id: string) => void;
   onAddTask: () => void;
+  ai: AiAssistState;
 }
 
 /** Local hour (0-23) as a friendly "3pm" style label. */
@@ -58,9 +62,32 @@ function reminderNote(effectiveness: ReminderEffectiveness): string | null {
   return `${percent}% of reminders were followed by getting the task done.`;
 }
 
-export function CoachScreen({ personality, nextTask, tasks, projects, now, onStartFocus, onAddTask }: Props) {
+export function CoachScreen({ personality, nextTask, tasks, projects, openTasks, now, onStartFocus, onAddTask, ai }: Props) {
   const [blocker, setBlocker] = useState<Blocker>('start');
   const advice = getCoachingAdvice(blocker, personality);
+  const [planBusy, setPlanBusy] = useState(false);
+  const [planError, setPlanError] = useState('');
+  const [plan, setPlan] = useState('');
+
+  function planTodayWithAi() {
+    const payload = ai.prepare('daily-plan', openTasks, new Date(now));
+    if (!payload) { setPlanError('Add a task with a title first.'); return; }
+    setPlanError(''); setPlan('');
+    Alert.alert('Send to AI?', ai.describe(payload), [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Send', onPress: () => void runPlanToday() },
+    ]);
+  }
+
+  async function runPlanToday() {
+    const payload = ai.prepare('daily-plan', openTasks, new Date(now));
+    if (!payload) return;
+    setPlanBusy(true); setPlanError(''); setPlan('');
+    const result = await ai.send(payload);
+    setPlanBusy(false);
+    if (result.status !== 'success') { setPlanError(result.message); return; }
+    setPlan(result.value.text);
+  }
 
   const nowDate = useMemo(() => new Date(now), [now]);
   const streak = useMemo(() => completionStreak(tasks, nowDate), [tasks, nowDate]);
@@ -82,7 +109,20 @@ export function CoachScreen({ personality, nextTask, tasks, projects, now, onSta
       <Text style={styles.taskTitle}>{advice.nextStep}</Text>
       <Button label={nextTask ? 'Try a 5-minute session' : 'Add your first step'} onPress={() => nextTask ? onStartFocus(nextTask.id) : onAddTask()} />
     </View>
-    <Text style={styles.caption}>These suggestions are built in. No task details are sent to an AI service.</Text>
+    <Text style={styles.caption}>
+      {ai.available
+        ? "These suggestions are built in and never leave this device. AI assistance below is on: tapping “Plan today” sends only your open tasks' titles and due times, and only after you confirm."
+        : `These suggestions are built in and never leave this device. ${ai.unavailableReason}`}
+    </Text>
+    {openTasks.length > 0 ? <View style={styles.card}>
+      <Ionicons name="sparkles-outline" color={colors.accent} size={28} />
+      <Text style={styles.cardTitle}>Plan today</Text>
+      <Text style={styles.body}>Sends only your open tasks' titles and due times to suggest a realistic order — nothing else about them, and only once you confirm.</Text>
+      <Button quiet disabled={!ai.available || planBusy} label={planBusy ? 'Asking AI…' : 'Plan today with AI'} onPress={planTodayWithAi} />
+      {!ai.available ? <Text style={styles.caption}>{ai.unavailableReason}</Text> : null}
+      {planError ? <Text style={styles.error}>{planError}</Text> : null}
+      {plan ? <Text style={styles.body}>{plan}</Text> : null}
+    </View> : null}
 
     <View style={styles.sectionHead}><Text style={styles.eyebrow}>YOUR PATTERNS</Text></View>
     {!hasHistory ? (
@@ -145,6 +185,7 @@ const styles = StyleSheet.create({
   hero: { color: colors.text, fontSize: 35, lineHeight: 41, fontWeight: '700', letterSpacing: -1.3 },
   body: { color: colors.textMuted, fontSize: 15, lineHeight: 23 },
   caption: { color: colors.textMuted, fontSize: 12, lineHeight: 19 },
+  error: { color: colors.errorText, fontSize: 12, lineHeight: 18 },
   wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   card: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: radii.lg, padding: 20, gap: spacing.md, marginTop: 10 },
   cardTitle: { color: colors.text, fontSize: 23, lineHeight: 30, fontWeight: '600', letterSpacing: -0.5 },

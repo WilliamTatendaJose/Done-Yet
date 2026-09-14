@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Alert, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { StatusBar } from 'expo-status-bar';
@@ -6,6 +6,10 @@ import { randomUUID } from 'expo-crypto';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { AppState, Attachment, Milestone, Project, RecurrenceRule, ReminderLevel, Subtask, Task } from '../../../../src/domain/types';
 import type { Action } from '../../../../src/state/model';
+import { estimateDuration, type DurationEstimate } from '../../../../src/domain/estimate';
+import { suggestSteps } from '../../../../src/domain/breakdown';
+import type { AiPayload } from '../../../../src/domain/aiPayload';
+import { parseBreakdownSteps } from '../../../../src/domain/aiResponse';
 import { Button, Choice, Field, IconButton } from '../../components/ui';
 import { RepeatFields } from './RepeatFields';
 import { TagFields } from './TagFields';
@@ -14,7 +18,20 @@ import { MilestoneFields } from './MilestoneFields';
 import { AttachmentFields } from './AttachmentFields';
 import { deleteAttachmentFile } from '../attachments/storage';
 import type { AttachmentDownloadOutcome } from '../../cloud/useCloudSync';
+import type { AiAssistState } from '../../cloud/useAiAssist';
 import { colors, spacing } from '../../theme';
+
+/** Plain-language rendering of an on-device DurationEstimate; kept in the UI layer since the domain
+ * function only returns numbers and a basis, not copy. Always says "on-device" — this is a rule-based
+ * estimate from the user's own history, never a model, and nothing here is sent anywhere. */
+function estimateLabel(estimate: DurationEstimate): string {
+  const time = estimate.minutes >= 60
+    ? `${Math.round((estimate.minutes / 60) * 10) / 10}h`
+    : `${estimate.minutes} min`;
+  if (estimate.basis === 'default') return `About ${time}, as a starting guess — you don't have finished tasks like this yet. Estimated on-device.`;
+  if (estimate.basis === 'similar') return `About ${time}, based on ${estimate.sampleSize} similar task${estimate.sampleSize === 1 ? '' : 's'} you've finished. Estimated on-device.`;
+  return `About ${time}, based on ${estimate.sampleSize} task${estimate.sampleSize === 1 ? '' : 's'} you've finished. Estimated on-device.`;
+}
 
 export type EditorSelection =
   | { kind: 'task'; task?: Task }
@@ -33,9 +50,11 @@ interface Props {
   state: AppState;
   saving: boolean;
   error: string;
+  now: number;
   dispatch: (action: Action) => Promise<boolean>;
   onClose: () => void;
   attachmentSync?: AttachmentSyncProps;
+  ai: AiAssistState;
 }
 
 const levels: ReminderLevel[] = ['gentle', 'persistent', 'firm', 'relentless'];
@@ -53,7 +72,7 @@ export function EntityEditorModal(props: Props) {
   return <EditorForm key={`${selection.kind}:${id ?? 'new'}`} {...props} selection={selection} />;
 }
 
-function EditorForm({ selection, state, saving, error, dispatch, onClose, attachmentSync }: Props & { selection: NonNullable<EditorSelection> }) {
+function EditorForm({ selection, state, saving, error, now, dispatch, onClose, attachmentSync, ai }: Props & { selection: NonNullable<EditorSelection> }) {
   const task = selection.kind === 'task' ? selection.task : undefined;
   const project = selection.kind === 'project' ? selection.project : undefined;
   const [title, setTitle] = useState(task?.title ?? project?.title ?? '');
@@ -71,9 +90,73 @@ function EditorForm({ selection, state, saving, error, dispatch, onClose, attach
   const [milestones, setMilestones] = useState<Milestone[]>(project?.milestones ?? []);
   const [attachments, setAttachments] = useState<Attachment[]>(task?.attachments ?? []);
   const [originalAttachmentIds] = useState(() => new Set((task?.attachments ?? []).map(a => a.id)));
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState('');
 
   const isProject = selection.kind === 'project';
   const heading = isProject ? project ? 'Edit project' : 'New project' : task ? 'Edit task' : 'New task';
+
+  // On-device only: a rough estimate of how long this task will take, from the user's own finished
+  // tasks (never from anyone else's data, never sent anywhere). Recomputed as the draft's project and
+  // tags change so it reflects what's actually being saved, not just the task as it was opened.
+  const draftForEstimate: Task | null = isProject ? null : {
+    id: task?.id ?? 'draft', title: title || 'Untitled', notes: '', projectId, status: 'todo', priority,
+    dueAt: null, createdAt: task?.createdAt ?? new Date(now).toISOString(), updatedAt: task?.updatedAt ?? new Date(now).toISOString(),
+    completedAt: null, reminderMode: 'normal', reminderLevel: 'gentle', snoozedUntil: null, lastRemindedAt: null,
+    snoozeCount: 0, tags,
+  };
+  const estimate = useMemo(
+    () => draftForEstimate ? estimateDuration(draftForEstimate, state.tasks, new Date(now)) : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isProject, task?.id, projectId, tags, state.tasks, now],
+  );
+
+  // Rule-based, on-device first pass only (see domain/breakdown.ts) — reuses the existing
+  // addMilestone action rather than a new one, and is only offered for a project that already
+  // exists (a brand-new, unsaved project has no id yet for a milestone to attach to).
+  async function suggestProjectSteps() {
+    if (!project) return;
+    const steps = suggestSteps(project, new Date(now));
+    const added: Milestone[] = [];
+    for (const step of steps) {
+      const milestoneId = randomUUID();
+      const ok = await dispatch({ type: 'addMilestone', id: project.id, milestoneId, title: step.title });
+      if (ok) added.push({ id: milestoneId, title: step.title, targetAt: null, done: false });
+    }
+    if (added.length) setMilestones(prev => [...prev, ...added]);
+  }
+
+  // Cloud AI first pass — only offered when settings.aiAssistEnabled is on (see ai.available).
+  // Shows the user exactly what would be sent (describePayload) and requires an explicit "Send"
+  // tap before anything leaves the device; the on-device suggestProjectSteps above stays as the
+  // fallback when AI is off. Reuses the same addMilestone action, never a wider one.
+  function breakdownWithAi() {
+    if (!project) return;
+    const payload = ai.prepare('breakdown', project, new Date(now));
+    if (!payload) { setAiError('This project needs a title and due date before AI can suggest steps.'); return; }
+    setAiError('');
+    Alert.alert('Send to AI?', ai.describe(payload), [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Send', onPress: () => void runAiBreakdown(payload) },
+    ]);
+  }
+
+  async function runAiBreakdown(payload: AiPayload) {
+    if (!project) return;
+    setAiBusy(true); setAiError('');
+    const result = await ai.send(payload);
+    setAiBusy(false);
+    if (result.status !== 'success') { setAiError(result.message); return; }
+    const steps = parseBreakdownSteps(result.value.text);
+    if (!steps.length) { setAiError('The AI did not return any steps. Try again.'); return; }
+    const added: Milestone[] = [];
+    for (const title of steps) {
+      const milestoneId = randomUUID();
+      const ok = await dispatch({ type: 'addMilestone', id: project.id, milestoneId, title });
+      if (ok) added.push({ id: milestoneId, title, targetAt: null, done: false });
+    }
+    if (added.length) setMilestones(prev => [...prev, ...added]);
+  }
 
   async function save() {
     const cleanTitle = title.trim();
@@ -172,6 +255,7 @@ function EditorForm({ selection, state, saving, error, dispatch, onClose, attach
               <Field label="Priority"><View style={styles.wrap}>{(['low', 'medium', 'high'] as const).map(value => <Choice key={value} label={value} selected={priority === value} onPress={() => setPriority(value)} />)}</View></Field>
               {state.projects.length ? <Field label="Project"><View style={styles.wrap}><Choice label="None" selected={projectId === null} onPress={() => setProjectId(null)} />{state.projects.map(item => <Choice key={item.id} label={item.title} selected={projectId === item.id} onPress={() => setProjectId(item.id)} />)}</View></Field> : null}
               <TagFields value={tags} tasks={state.tasks} onChange={setTags} />
+              {estimate ? <Text style={styles.caption}>{estimateLabel(estimate)}</Text> : null}
             </> : null}
             <View style={styles.between}>
               <Text style={styles.fieldLabel}>Set a deadline</Text>
@@ -184,6 +268,15 @@ function EditorForm({ selection, state, saving, error, dispatch, onClose, attach
               </View>
               {picker ? <DateTimePicker value={due} mode={picker} themeVariant="dark" onChange={(_, selected) => { if (Platform.OS === 'android') setPicker(null); if (selected) setDue(selected); }} /> : null}
             </> : null}
+            {isProject && project ? <View style={styles.wrap}>
+              <Button quiet icon="bulb-outline" label="Suggest steps" onPress={suggestProjectSteps} />
+              <Text style={styles.caption}>Simple, on-device suggestions — nothing about this project is sent anywhere.</Text>
+            </View> : null}
+            {isProject && project && ai.available ? <View style={styles.wrap}>
+              <Button quiet icon="sparkles-outline" label={aiBusy ? 'Asking AI…' : 'Break down with AI'} disabled={aiBusy} onPress={breakdownWithAi} />
+              <Text style={styles.caption}>Shows exactly what would be sent, and asks you to confirm, before anything leaves this device.</Text>
+              {aiError ? <Text style={styles.error}>{aiError}</Text> : null}
+            </View> : null}
             {isProject ? <MilestoneFields value={milestones} onChange={setMilestones} /> : null}
             {!isProject && hasDue ? <RepeatFields value={repeat} dueAt={due} onChange={setRepeat} /> : null}
             {!isProject ? <>
@@ -213,4 +306,5 @@ const styles = StyleSheet.create({
   between: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.sm },
   fieldLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
   error: { color: colors.errorText, padding: 14, backgroundColor: colors.errorSurface, borderRadius: 12 },
+  caption: { color: colors.textMuted, fontSize: 12, lineHeight: 19 },
 });

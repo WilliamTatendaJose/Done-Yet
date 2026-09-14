@@ -8,7 +8,7 @@ import { createSupabaseAuthClient, type AuthResult } from './auth';
 import { createAttachmentsClient } from './attachments';
 import { drainAttachmentQueue, enqueueAttachmentDelete, enqueueAttachmentUpload } from './attachmentSync';
 import { getSupabaseConfig } from './config';
-import { createSupabaseRestClient, isCloudSuccess, type CloudDocument, type CloudSyncClient } from './runtime';
+import { createSupabaseRestClient, isCloudSuccess, type CloudDocument, type CloudSyncClient, type CloudTokenProvider } from './runtime';
 import { createSecureCloudSessionStore, useCloudSession, type CloudSession } from './session';
 
 export type AttachmentDownloadOutcome = { ok: true; localName: string } | { ok: false; message: string };
@@ -23,6 +23,13 @@ export interface CloudSyncState {
   lastSyncedAt: string | null;
   message: string;
   remoteVersion: string | null;
+  /** True once a cloud session is loaded and present. The precondition other authenticated cloud
+   * features (currently AI assistance, see cloud/useAiAssist.ts) check before ever offering to
+   * make a request — the ai-assist Edge Function requires a signed-in caller. */
+  signedIn: boolean;
+  /** The signed-in user's access token, for other authenticated cloud calls that reuse this same
+   * session rather than opening a second one. Resolves at call time; never cached by a consumer. */
+  token: CloudTokenProvider;
   signIn(email: string, password: string): Promise<boolean>;
   signUp(email: string, password: string): Promise<{ ok: boolean; pendingConfirmation: boolean }>;
   signOut(): Promise<boolean>;
@@ -343,6 +350,8 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     lastSyncedAt,
     message: message || sessionError,
     remoteVersion,
+    signedIn: !!session,
+    token: sessionStore.token,
     signIn,
     signUp,
     signOut,

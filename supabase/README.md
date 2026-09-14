@@ -61,6 +61,43 @@ these refusals rather than 403. Both accounts and the probe object were deleted 
 
 Still unverified: an attachment uploaded by the app itself, and downloaded onto a second device.
 
+## Cloud AI assistance
+
+Cloud AI assistance is an Edge Function, `mobile/supabase/functions/ai-assist`, that proxies three
+narrow requests (`breakdown`, `progress-parse`, `daily-plan`) to the Muse provider
+(`https://api.meta.ai/v1/chat/completions`, model `muse-spark-1.3-contributor`). **The provider key
+lives only in this function** — it is read server-side via `Deno.env.get('MUSE_API_KEY')`, is never
+embedded in the app, never has an `EXPO_PUBLIC_` counterpart, and never appears anywhere in this
+repository. Deploy it with:
+
+```text
+supabase secrets set MUSE_API_KEY=your-provider-key
+supabase functions deploy ai-assist
+```
+
+The function requires a signed-in caller (Supabase verifies the JWT before the function runs,
+and the function itself independently rejects a request with no `Authorization: Bearer …` header)
+and never reads a user id from the request body — only from the verified token. The client
+(`mobile/src/cloud/aiAssist.ts`) sends only the minimised `{ task, fields }` shape produced by
+`domain/aiPayload.ts`'s `buildPayload`; the function does not trust that minimisation and
+independently re-validates an exact allow-list of fields per task, rejecting any request with an
+extra, missing, or over-limit field with a 400: `breakdown` accepts only `title` (≤200 chars),
+`description` (≤1000 chars) and `daysRemaining`; `progress-parse` accepts only `sentence` (≤500
+chars); `daily-plan` accepts only `titles` (≤50 entries, each ≤200 chars) and a matching `times`
+array. The actual prompt sent to the provider is built entirely server-side from those validated
+fields — the client never supplies, and the function never accepts, a ready-made prompt.
+
+The provider is a **reasoning model**: even a trivial prompt consumes real "thinking" tokens before
+any visible output, and a too-small `max_tokens` produces an HTTP 200 with `content: null` and
+`finish_reason: "length"` — a silent empty success. The function calls it with `max_tokens: 2000`
+and treats `content == null` or `finish_reason === "length"` as a specific, actionable error, never
+as an empty success. It logs neither the request body, the prompt it builds, nor the key.
+
+Before enabling a production build, verify: a request with no `Authorization` header is refused
+with 401; a request with an extra or missing field for its task is refused with 400 and does not
+reach the provider; and a request that would exceed the reasoning model's token budget surfaces a
+clear error rather than an empty response.
+
 ## Gateway API key
 
 Every Supabase request needs the publishable/anon key in an `apikey` header, **including** requests that

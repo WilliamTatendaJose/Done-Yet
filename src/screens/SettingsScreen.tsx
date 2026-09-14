@@ -67,13 +67,35 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
         <Button quiet label={`Make "${s.title}" ${s.level}`} onPress={() => onApplyEscalation(s.taskId, s.level)} />
       </View>)}
     </View> : null}
+    <View style={styles.settingRow}>
+      <View style={styles.settingCopy}>
+        <Text style={styles.taskTitle}>AI assistance (cloud)</Text>
+        <Text style={styles.small}>
+          Off by default. When you turn this on, three specific actions you tap for yourself can
+          send a small, fixed request to an AI service: breaking a project into steps sends only its
+          title, description and days remaining; reading a status update sends only the sentence you
+          typed; planning today sends only your open tasks' titles and due times. Nothing else about
+          a task or project — no notes, ids, tags or history — is ever included, and every one of
+          those requests shows you exactly what it would send and waits for you to confirm before
+          anything leaves this device. Requires being signed in to cloud sync, since the request goes
+          through your account. Turning this off again stops all of it immediately.
+        </Text>
+      </View>
+      <Switch accessibilityLabel="AI assistance (cloud)" value={!!state.settings.aiAssistEnabled} onValueChange={value => { void onSettingsChange({ aiAssistEnabled: value }); }} trackColor={{ true: colors.accent }} thumbColor={colors.text} />
+    </View>
     <Field label="Coach personality">
       <View style={styles.wrap}>{(['supportive', 'direct', 'minimal'] as const).map(personality => <Choice key={personality} label={personality} selected={state.settings.personality === personality} onPress={() => { void onSettingsChange({ personality }); }} />)}</View>
     </Field>
     <View style={styles.card}>
       <Ionicons name="phone-portrait-outline" color={colors.accent} size={24} />
       <Text style={styles.fieldLabel}>Native app · local data</Text>
-      <Text style={styles.body}>Tasks are stored on this phone first. Cloud sync is optional and only sends your snapshot after you sign in. No AI service receives your tasks.</Text>
+      <Text style={styles.body}>
+        Tasks are stored on this phone first. Cloud sync is optional and only sends your snapshot
+        after you sign in. Duration estimates and on-device step suggestions run on this device and
+        are never sent anywhere. AI assistance above is {state.settings.aiAssistEnabled
+          ? 'on — the three actions described above can send the small, fixed requests noted there, only when you tap them and only after you confirm'
+          : 'off — no task or project details reach any AI service'}.
+      </Text>
     </View>
   </ScrollView>;
 }
