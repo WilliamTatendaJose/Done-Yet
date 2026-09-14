@@ -30,6 +30,7 @@ interface Props {
   /** Open (not-yet-done) tasks, used only to build the minimised daily-plan request — see domain/aiPayload.ts's buildPayload, which reads just each task's title and dueAt. */
   openTasks: Task[];
   now: number;
+  defaultFocusMinutes: number;
   onStartFocus: (id: string) => void;
   onAddTask: () => void;
   ai: AiAssistState;
@@ -62,7 +63,7 @@ function reminderNote(effectiveness: ReminderEffectiveness): string | null {
   return `${percent}% of reminders were followed by getting the task done.`;
 }
 
-export function CoachScreen({ personality, nextTask, tasks, projects, openTasks, now, onStartFocus, onAddTask, ai }: Props) {
+export function CoachScreen({ personality, nextTask, tasks, projects, openTasks, now, defaultFocusMinutes, onStartFocus, onAddTask, ai }: Props) {
   const [blocker, setBlocker] = useState<Blocker>('start');
   const advice = getCoachingAdvice(blocker, personality);
   const [planBusy, setPlanBusy] = useState(false);
@@ -107,7 +108,7 @@ export function CoachScreen({ personality, nextTask, tasks, projects, openTasks,
       <Text style={styles.cardTitle}>{advice.title}</Text>
       <Text style={styles.body}>{advice.body}</Text>
       <Text style={styles.taskTitle}>{advice.nextStep}</Text>
-      <Button label={nextTask ? 'Try a 5-minute session' : 'Add your first step'} onPress={() => nextTask ? onStartFocus(nextTask.id) : onAddTask()} />
+      <Button label={nextTask ? `Try a ${defaultFocusMinutes}-minute session` : 'Add your first step'} onPress={() => nextTask ? onStartFocus(nextTask.id) : onAddTask()} />
     </View>
     <Text style={styles.caption}>
       {ai.available

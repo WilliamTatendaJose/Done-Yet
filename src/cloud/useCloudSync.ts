@@ -10,6 +10,9 @@ import { drainAttachmentQueue, enqueueAttachmentDelete, enqueueAttachmentUpload 
 import { getSupabaseConfig } from './config';
 import { createSupabaseRestClient, isCloudSuccess, type CloudDocument, type CloudSyncClient, type CloudTokenProvider } from './runtime';
 import { createSecureCloudSessionStore, useCloudSession, type CloudSession } from './session';
+import { proAccessReason, type ProAccess } from './subscriptionPolicy';
+
+export type { ProAccess } from './subscriptionPolicy';
 
 export type AttachmentDownloadOutcome = { ok: true; localName: string } | { ok: false; message: string };
 export type AccountActionOutcome = { ok: boolean; message: string };
@@ -27,6 +30,7 @@ export interface CloudSyncState {
    * features (currently AI assistance, see cloud/useAiAssist.ts) check before ever offering to
    * make a request — the ai-assist Edge Function requires a signed-in caller. */
   signedIn: boolean;
+  userId: string | null;
   /** The signed-in user's access token, for other authenticated cloud calls that reuse this same
    * session rather than opening a second one. Resolves at call time; never cached by a consumer. */
   token: CloudTokenProvider;
@@ -82,7 +86,8 @@ function summarizeMerge(tookLocal: number, tookRemote: number) {
  * id (newest `updatedAt` wins, ties keep local) rather than asking the user
  * to pick a whole copy — see domain/merge.ts.
  */
-export function useCloudSync(state: AppState | null, dispatch: (action: Action) => Promise<boolean>, replaceRemote: (raw: string) => Promise<boolean>): CloudSyncState {
+export function useCloudSync(state: AppState | null, dispatch: (action: Action) => Promise<boolean>, replaceRemote: (raw: string) => Promise<boolean>, access: ProAccess = { isPro: true, resolving: false }): CloudSyncState {
+  const isPro = access.isPro, entitlementResolving = access.resolving;
   const config = useMemo(() => getSupabaseConfig(), []);
   const sessionStore = useMemo(() => createSecureCloudSessionStore(), []);
   const sessionState = useCloudSession(sessionStore);
@@ -93,6 +98,7 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   const [remoteVersion, setRemoteVersion] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const clientRef = useRef<CloudSyncClient | null>(null);
+  const initialSyncUserRef = useRef<string | null>(null);
   const auth = useMemo(() => config ? createSupabaseAuthClient(config) : null, [config]);
   const stateRef = useRef<AppState | null>(state);
 
@@ -100,6 +106,7 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
 
   useEffect(() => {
     sessionRef.current = session;
+    if (!session) initialSyncUserRef.current = null;
     if (!config) setStatus('disabled');
     else if (session && status === 'signed-out') setStatus('signed-out');
   }, [config, session, status]);
@@ -225,8 +232,10 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     const saved = await saveSession(result.session);
     if (saved.status !== 'success') { setStatus('error'); setMessage(saved.message); return false; }
     sessionRef.current = result.session;
-    return syncWith(state, result.session);
-  }, [auth, config, saveSession, state, syncWith]);
+    setStatus('signed-out');
+    setMessage('Signed in. Checking Done Yet? Pro access…');
+    return true;
+  }, [auth, config, saveSession]);
 
   const signUp = useCallback(async (email: string, password: string) => {
     if (!config || !auth) { setStatus('disabled'); setMessage('Cloud sync is not configured for this build.'); return { ok: false, pendingConfirmation: false }; }
@@ -237,9 +246,10 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     const saved = await saveSession(result.session);
     if (saved.status !== 'success') { setStatus('error'); setMessage(saved.message); return { ok: false, pendingConfirmation: false }; }
     sessionRef.current = result.session;
-    await syncWith(state, result.session);
+    setStatus('signed-out');
+    setMessage('Account created. Checking Done Yet? Pro access…');
     return { ok: true, pendingConfirmation: false };
-  }, [auth, config, saveSession, state, syncWith]);
+  }, [auth, config, saveSession]);
 
   const signOut = useCallback(async () => {
     const result = await clearSession();
@@ -288,11 +298,26 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   }, [auth, clearSession, config, sessionStore]);
 
   const syncNow = useCallback(() => {
+    const accessError = proAccessReason(access, 'cloud sync');
+    if (accessError) { setMessage(`${accessError} Your local data is safe on this device.`); return Promise.resolve(false); }
     const session = sessionRef.current;
     if (!config) { setStatus('disabled'); setMessage('Cloud sync is not configured for this build.'); return Promise.resolve(false); }
     if (!session) { setStatus('signed-out'); setMessage('Sign in to sync this device.'); return Promise.resolve(false); }
     return syncWith(state, session);
-  }, [config, state, syncWith]);
+  }, [access, config, state, syncWith]);
+
+  // Authentication is needed before RevenueCat can bind the subscription to the Supabase UUID.
+  // Once that separate check resolves to Pro, perform the first sync exactly once for this user.
+  useEffect(() => {
+    const current = sessionRef.current;
+    if (!current || !state || entitlementResolving || !isPro) {
+      if (!current || (!entitlementResolving && !isPro)) initialSyncUserRef.current = null;
+      return;
+    }
+    if (initialSyncUserRef.current === current.userId) return;
+    initialSyncUserRef.current = current.userId;
+    void syncWith(state, current);
+  }, [state, isPro, entitlementResolving, syncWith]);
 
   useEffect(() => {
     if (!state || !sessionRef.current || status !== 'synced') return;
@@ -317,17 +342,19 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   }, [config, onAttachmentUploaded, sessionStore]);
 
   useEffect(() => {
-    if (status !== 'synced' || !sessionRef.current) return;
+    if (status !== 'synced' || !sessionRef.current || !isPro) return;
     void drainAttachments(sessionRef.current);
-  }, [status, drainAttachments]);
+  }, [status, drainAttachments, isPro]);
 
   // Draining only on a status transition misses the common case: the queue gains an entry
   // while already synced, so nothing changes and the effect never re-runs. Drain on enqueue too.
   const enqueueUpload = useCallback(async (attachment: Attachment) => {
+    const accessError = proAccessReason(access, 'cloud attachments');
+    if (accessError) { setMessage(accessError); return; }
     if (!config) return;
     await enqueueAttachmentUpload(attachment);
     if (sessionRef.current) void drainAttachments(sessionRef.current);
-  }, [config, drainAttachments]);
+  }, [access, config, drainAttachments]);
   const enqueueDelete = useCallback(async (attachment: Pick<Attachment, 'id' | 'remoteKey'>) => {
     if (!config) return;
     await enqueueAttachmentDelete(attachment);
@@ -335,13 +362,15 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   }, [config, drainAttachments]);
 
   const downloadAttachment = useCallback(async (attachment: Attachment): Promise<AttachmentDownloadOutcome> => {
+    const accessError = proAccessReason(access, 'cloud attachments');
+    if (accessError) return { ok: false, message: `${accessError} Existing files can still be removed.` };
     if (!config) return { ok: false, message: 'Cloud sync is not configured for this build.' };
     if (!sessionRef.current) return { ok: false, message: 'Sign in to download this file.' };
     if (!attachment.remoteKey) return { ok: false, message: 'This attachment has no cloud copy.' };
     const client = createAttachmentsClient({ url: config.url, apiKey: config.anonKey, token: sessionStore.token });
     const result = await client.downloadAttachment(attachment.remoteKey);
     return isCloudSuccess(result) ? { ok: true, localName: result.value.localName } : { ok: false, message: errorMessage(result) };
-  }, [config, sessionStore]);
+  }, [access, config, sessionStore]);
 
   return {
     configured: !!config,
@@ -351,6 +380,7 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     message: message || sessionError,
     remoteVersion,
     signedIn: !!session,
+    userId: session?.userId ?? null,
     token: sessionStore.token,
     signIn,
     signUp,

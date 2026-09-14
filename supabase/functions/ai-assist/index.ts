@@ -170,6 +170,11 @@ Deno.serve(async (req: Request) => {
 
   const apiKey = Deno.env.get('MUSE_API_KEY');
   if (!apiKey) return jsonResponse({ error: 'AI assistance is not configured on the server.' }, 500);
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY');
+  if (!supabaseUrl || !supabaseKey) return jsonResponse({ error: 'AI assistance is not configured on the server.' }, 500);
+  const entitlement = await fetch(`${supabaseUrl}/rest/v1/rpc/is_pro_user`, { method: 'POST', headers: { apikey: supabaseKey, Authorization: authHeader, 'content-type': 'application/json' }, body: '{}' });
+  if (!entitlement.ok || (await entitlement.json()) !== true) return jsonResponse({ error: 'Done Yet? Pro is required for AI assistance.' }, 402);
 
   let body: unknown;
   try { body = await req.json(); }

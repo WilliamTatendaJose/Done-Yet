@@ -3,6 +3,7 @@ import { FlatList, StyleSheet, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import type { Task } from '../../../src/domain/types';
 import { Button } from '../components/ui';
+import { FocusDurationChips } from '../features/focus/FocusDurationChips';
 import { TaskRow } from '../features/tasks/TaskRow';
 import { colors, spacing } from '../theme';
 
@@ -11,10 +12,13 @@ interface Props {
   tasks: Task[];
   completed: Task[];
   nextTask?: Task;
+  /** settings.focusMinutes ?? 5 — kept as a prop so the default-path button always reflects the
+   * user's chosen default without this screen re-deriving it from raw settings. */
+  defaultFocusMinutes: number;
   onEditTask: (task: Task) => void;
   onCompleteTask: (id: string) => void;
   onToggleTask: (id: string) => void;
-  onStartFocus: (id: string) => void;
+  onStartFocus: (id: string, minutes?: number) => void;
   onAddTask: () => void;
   onOpenCoach: () => void;
 }
@@ -42,8 +46,11 @@ export function TodayScreen(props: Props) {
       <View style={styles.focusCard}>
         <View style={styles.between}><Text style={styles.accentLabel}>{nextTask ? 'YOUR NEXT MOVE' : 'ROOM TO BREATHE'}</Text><Ionicons name={nextTask ? 'arrow-forward' : 'checkmark-circle-outline'} color={colors.accent} size={22} /></View>
         <Text style={styles.cardTitle}>{nextTask?.title ?? 'Nothing waiting on you.'}</Text>
-        <Text style={styles.body}>{nextTask?.notes || (nextTask ? 'Five minutes is a good place to start.' : 'Enjoy the space, or add your next intention.')}</Text>
-        <Button icon={nextTask ? 'play' : 'add'} label={nextTask ? 'Start for 5 minutes' : 'Add a task'} onPress={() => nextTask ? props.onStartFocus(nextTask.id) : props.onAddTask()} />
+        <Text style={styles.body}>{nextTask?.notes || (nextTask ? 'A small block is a good place to start.' : 'Enjoy the space, or add your next intention.')}</Text>
+        {/* One tap for the default length — a user who just wants to start never has to choose. */}
+        <Button icon={nextTask ? 'play' : 'add'} label={nextTask ? `Start for ${props.defaultFocusMinutes} minutes` : 'Add a task'} onPress={() => nextTask ? props.onStartFocus(nextTask.id) : props.onAddTask()} />
+        {/* Optional: pick a different length instead. Still one tap for a preset. */}
+        {nextTask ? <FocusDurationChips onSelect={minutes => props.onStartFocus(nextTask.id, minutes)} /> : null}
         {nextTask ? <View style={styles.between}><Button quiet label="I’m blocked" onPress={props.onOpenCoach} /><Button quiet label="Mark done" onPress={() => props.onCompleteTask(nextTask.id)} /></View> : null}
       </View>
       <View style={styles.sectionHead}><Text style={styles.eyebrow}>ON YOUR RADAR</Text><Text style={styles.caption}>{tasks.length} open</Text></View>

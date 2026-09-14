@@ -1,10 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Project, Task } from '../../../src/domain/types';
 import { useMobileStore } from '../state/useMobileStore';
 import { useNotifications } from '../notifications/useNotifications';
+import { useCalendarSync } from '../features/calendar/useCalendarSync';
+import { useShortcutLink } from '../features/shortcuts/useShortcutLink';
+import { useQuickActions } from '../features/shortcuts/useQuickActions';
+import { updateWidget } from '../features/widget/updateWidget';
 import { useAppClock } from '../hooks/useAppClock';
 import { useInAppReminder } from '../features/reminders/useInAppReminder';
 import { useEscalationSuggestions } from '../features/escalation/useEscalationSuggestions';
@@ -25,6 +29,8 @@ import { ProjectsScreen } from '../screens/ProjectsScreen';
 import { CoachScreen } from '../screens/CoachScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { colors, spacing } from '../theme';
+import { useRevenueCat } from '../cloud/revenueCat';
+import type { ProAccess } from '../cloud/subscriptionPolicy';
 
 const priorityRank: Record<Task['priority'], number> = { high: 0, medium: 1, low: 2 };
 
@@ -33,9 +39,13 @@ export function MobileApp() {
   const [tab, setTab] = useState<TabName>('Today');
   const [editor, setEditor] = useState<EditorSelection>(null);
   const now = useAppClock(30_000);
+  const [proAccess, setProAccess] = useState<ProAccess>({ resolving: true, isPro: false });
   const notifications = useNotifications(state, dispatch, () => setTab('Projects'), () => setTab('Coach'));
-  const cloud = useCloudSync(state, dispatch, replaceRemote);
-  const ai = useAiAssist(state, cloud.signedIn, cloud.token);
+  const calendarSync = useCalendarSync(state, dispatch);
+  const cloud = useCloudSync(state, dispatch, replaceRemote, proAccess);
+  const billing = useRevenueCat(cloud.userId ?? undefined);
+  useEffect(() => { const next = { resolving: billing.state.resolving, isPro: billing.state.isPro }; setProAccess(prev => prev.resolving === next.resolving && prev.isPro === next.isPro ? prev : next); }, [billing.state.resolving, billing.state.isPro]);
+  const ai = useAiAssist(state, cloud.signedIn, proAccess, cloud.token);
   const escalationSuggestions = useEscalationSuggestions(state, now, dispatch);
   const openTasks = useMemo(() => state?.tasks.filter(task => task.status === 'todo') ?? [], [state?.tasks]);
   const completedTasks = useMemo(() => state?.tasks.filter(task => task.status === 'done') ?? [], [state?.tasks]);
@@ -48,6 +58,31 @@ export function MobileApp() {
     dispatch,
   });
   const { celebration, clear: clearCelebration } = useCompletionCelebration(state, now);
+
+  // Widget data must reflect the persisted snapshot as soon as it changes, on app start included —
+  // not only while the app is in the foreground. This covers "in the foreground"; the widget's own
+  // headless task handler (registerWidgetTaskHandler) covers the OS's periodic background refresh.
+  useEffect(() => { if (state) void updateWidget(state); }, [state]);
+
+  // One handler for all three routes into the same two actions: a long-press launcher shortcut,
+  // an Assistant intent built on it, and a plain `doneyet://` link.
+  //
+  // A cold start delivers the action before SQLite has loaded, so "focus" cannot pick a task yet.
+  // Park it and run it once tasks exist, otherwise the shortcut silently does nothing — which is
+  // exactly how it failed on device before this was added.
+  const [pendingShortcut, setPendingShortcut] = useState<'add-task' | 'focus' | null>(null);
+  const runShortcut = useCallback((action: 'add-task' | 'focus') => {
+    if (action === 'add-task') { setEditor({ kind: 'task' }); return; }
+    setPendingShortcut('focus');
+  }, []);
+  useShortcutLink(runShortcut);
+  useQuickActions(runShortcut);
+  useEffect(() => {
+    if (pendingShortcut !== 'focus' || !state) return;
+    const target = orderedTasks[0];
+    setPendingShortcut(null);
+    if (target) void dispatch({ type: 'startFocus', id: target.id });
+  }, [pendingShortcut, state, orderedTasks, dispatch]);
 
   if (!state) return <LoadingState error={error} retry={retry} restore={importSnapshot} />;
 
@@ -71,7 +106,7 @@ export function MobileApp() {
         />
       </View>
     </View>
-    {error || notifications.error ? <View style={styles.banner}><Text accessibilityRole="alert" style={styles.error}>{error || notifications.error}</Text></View> : null}
+    {error || notifications.error || calendarSync.error ? <View style={styles.banner}><Text accessibilityRole="alert" style={styles.error}>{error || notifications.error || calendarSync.error}</Text></View> : null}
     {inAppReminder.reminder ? <View style={styles.banner}><InAppReminder task={inAppReminder.reminder} dispatch={dispatch} onDismiss={inAppReminder.dismiss} /></View> : null}
     <View style={styles.content}>
       {tab === 'Today' ? <TodayScreen
@@ -79,10 +114,11 @@ export function MobileApp() {
         tasks={orderedTasks}
         completed={completedTasks}
         nextTask={nextTask}
+        defaultFocusMinutes={state.settings.focusMinutes ?? 5}
         onEditTask={openTaskEditor}
         onCompleteTask={id => run({ type: 'completeTask', id })}
         onToggleTask={id => run({ type: 'toggleTask', id })}
-        onStartFocus={id => run({ type: 'startFocus', id })}
+        onStartFocus={(id, minutes) => run({ type: 'startFocus', id, minutes })}
         onAddTask={() => openTaskEditor()}
         onOpenCoach={() => setTab('Coach')}
       /> : null}
@@ -108,6 +144,7 @@ export function MobileApp() {
         projects={state.projects}
         openTasks={openTasks}
         now={now}
+        defaultFocusMinutes={state.settings.focusMinutes ?? 5}
         onStartFocus={id => run({ type: 'startFocus', id })}
         onAddTask={() => openTaskEditor()}
         ai={ai}
@@ -121,6 +158,7 @@ export function MobileApp() {
         cloud={cloud}
         escalationSuggestions={escalationSuggestions}
         onApplyEscalation={(id, level) => run({ type: 'applyEscalation', id, level })}
+        billing={billing}
       /> : null}
     </View>
     <AppTabBar selected={tab} onSelect={setTab} />
@@ -134,6 +172,7 @@ export function MobileApp() {
       onClose={() => setEditor(null)}
       attachmentSync={{ enqueueUpload: cloud.enqueueAttachmentUpload, enqueueDelete: cloud.enqueueAttachmentDelete, download: cloud.downloadAttachment }}
       ai={ai}
+      isPro={billing.state.isPro}
     />
     <FocusModal session={state.focus} task={focusTask} error={error} dispatch={dispatch} navigate={setTab} />
     {celebration ? <Confetti variant={celebration.variant} message={celebration.badge?.title} onDone={clearCelebration} /> : null}

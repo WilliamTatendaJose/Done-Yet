@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { initialState, reduce } from '../../../src/state/model';
-import { emptyLedger, MAX_PENDING, outsideQuietHours, planReminders } from './plan';
+import { describeQueueCoverage, emptyLedger, MAX_PENDING, outsideQuietHours, planReminders, queueCoverageMinutes } from './plan';
 const now = new Date('2026-09-12T12:00:00Z').getTime();
 function state() {
   const s = initialState(new Date(now)); s.settings = { ...s.settings, nativeNotificationsEnabled: true, quietHoursEnabled: false }; s.projects = [];
@@ -57,7 +57,14 @@ describe('native notification planning', () => {
   it('bounds the queue and preserves the selected persistence', () => {
     const s = state(); s.tasks = Array.from({ length: 20 }, (_, i) => ({ ...s.tasks[0], id: String(i), reminderMode: 'annoy', reminderLevel: 'gentle' }));
     const plan = planReminders(s, emptyLedger(), now); expect(plan.entries).toHaveLength(MAX_PENDING);
-    const t = plan.entries.filter(e => e.entityId === '0'); expect(t[1].at - t[0].at).toBe(30 * 60000);
+    const t = plan.entries.filter(e => e.entityId === '0'); expect(t[1].at - t[0].at).toBe(60 * 60000);
+  });
+  it('a per-task override takes precedence over the level interval', () => {
+    const s = state();
+    s.tasks[0] = { ...s.tasks[0], reminderMode: 'annoy', reminderLevel: 'gentle', reminderIntervalMinutes: 5 };
+    const plan = planReminders(s, emptyLedger(), now);
+    // gentle would space entries 60 minutes apart; the 5-minute override must govern instead.
+    expect(plan.entries[1].at - plan.entries[0].at).toBe(5 * 60000);
   });
   it('includes project check-ins but stops them at completion', () => {
     const s = state(); s.tasks = []; s.projects = initialState(new Date(now)).projects;
@@ -72,5 +79,15 @@ describe('native notification planning', () => {
     expect(next.entries[0].kind).toBe('project');
     expect(next.entries[0].at).toBeGreaterThan(afterFirst);
     expect(next.entries[0].id).not.toBe(first.entries[0].id);
+  });
+});
+describe('queue coverage hint (surfaces the consequence of a chosen interval)', () => {
+  it('computes MAX_PENDING x interval and formats it in the calm voice used for "queued on this device"', () => {
+    expect(queueCoverageMinutes(5)).toBe(MAX_PENDING * 5);
+    // The rescaled table's floor (relentless=5min) covers about 4 hours — exactly the example in the brief.
+    expect(describeQueueCoverage(5)).toBe('About 4 hours of reminders queued on this device.');
+    expect(describeQueueCoverage(15)).toBe('About 12 hours of reminders queued on this device.');
+    expect(describeQueueCoverage(30)).toBe('About 1 day of reminders queued on this device.');
+    expect(describeQueueCoverage(60)).toBe('About 2 days of reminders queued on this device.');
   });
 });

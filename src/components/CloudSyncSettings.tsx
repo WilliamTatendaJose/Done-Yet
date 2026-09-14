@@ -7,6 +7,8 @@ import { colors, radii, spacing } from '../theme';
 interface Props extends CloudSyncState {
   /** Opens the account screen (mobile/src/features/account/AccountModal.tsx) — reachable both to recover a forgotten password while signed out and to manage the account, including deletion, while signed in. */
   onOpenAccount: () => void;
+  isPro: boolean;
+  proResolving: boolean;
 }
 
 export function CloudSyncSettings(props: Props) {
@@ -27,19 +29,23 @@ export function CloudSyncSettings(props: Props) {
   }
 
   return <View style={styles.card}>
-    <Text style={styles.eyebrow}>OPTIONAL CLOUD SYNC</Text>
+    <Text style={styles.eyebrow}>DONE YET? PRO CLOUD SYNC</Text>
     <Text style={styles.title}>Your work, wherever you are.</Text>
     {!props.configured ? <Text style={styles.body}>Cloud sync is not configured for this build. Add the public Supabase URL and anonymous key at build time; local storage continues to work without them.</Text> : props.email ? <>
-      <Text style={styles.body}>Signed in as {props.email}. Local changes sync in the background when a connection is available.</Text>
+      <Text style={styles.body}>Signed in as {props.email}. {props.proResolving
+        ? 'Checking your Pro access…'
+        : props.isPro
+          ? 'Local changes sync in the background when a connection is available.'
+          : 'Upgrade to Pro to sync this device; your local data remains available.'}</Text>
       {props.lastSyncedAt ? <Text style={styles.caption}>Last synced {new Date(props.lastSyncedAt).toLocaleString()}</Text> : null}
       {props.message ? <Text accessibilityRole="alert" style={props.status === 'error' ? styles.error : styles.caption}>{props.message}</Text> : null}
-      <View style={styles.actions}><Button label={busy ? 'Syncing…' : 'Sync now'} disabled={busy} onPress={() => { void props.syncNow(); }} /><Button quiet label="Manage account" disabled={busy} onPress={props.onOpenAccount} /></View>
+      <View style={styles.actions}><Button label={busy ? 'Syncing…' : 'Sync now'} disabled={busy || props.proResolving || !props.isPro} onPress={() => { void props.syncNow(); }} /><Button quiet label="Manage account" disabled={busy} onPress={props.onOpenAccount} /></View>
     </> : <>
-      <Text style={styles.body}>Sign in to keep tasks and projects available across your devices. Your device remains usable offline.</Text>
+      <Text style={styles.body}>Sign in to connect a Pro purchase and keep tasks and projects available across your devices. Your device remains usable offline.</Text>
       <TextInput accessibilityLabel="Cloud email" autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="Email" placeholderTextColor={colors.textMuted} value={email} onChangeText={setEmail} style={styles.input} />
       <TextInput accessibilityLabel="Cloud password" autoCapitalize="none" autoComplete="password" secureTextEntry placeholder="Password (8+ characters)" placeholderTextColor={colors.textMuted} value={password} onChangeText={setPassword} style={styles.input} />
       {props.message ? <Text accessibilityRole="alert" style={props.status === 'error' ? styles.error : styles.caption}>{props.message}</Text> : null}
-      <View style={styles.actions}><Button label={busy ? 'Signing in…' : 'Sign in and sync'} disabled={busy || !email.trim() || password.length < 8} onPress={() => { void signIn(); }} /><Button quiet label="Create account" disabled={busy || !email.trim() || password.length < 8} onPress={() => { void signUp(); }} /></View>
+      <View style={styles.actions}><Button label={busy ? 'Signing in…' : 'Sign in'} disabled={busy || !email.trim() || password.length < 8} onPress={() => { void signIn(); }} /><Button quiet label="Create account" disabled={busy || !email.trim() || password.length < 8} onPress={() => { void signUp(); }} /></View>
       <Button quiet label="Forgot password?" onPress={props.onOpenAccount} />
     </>}
   </View>;
@@ -55,4 +61,3 @@ const styles = StyleSheet.create({
   input: { backgroundColor: colors.surfaceStrong, borderColor: colors.border, borderWidth: 1, borderRadius: radii.sm, color: colors.text, minHeight: 48, paddingHorizontal: 14, fontSize: 15 },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.md },
 });
-

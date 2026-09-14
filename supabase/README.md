@@ -61,6 +61,62 @@ these refusals rather than 403. Both accounts and the probe object were deleted 
 
 Still unverified: an attachment uploaded by the app itself, and downloaded onto a second device.
 
+## RevenueCat Pro subscriptions
+
+The native app uses `react-native-purchases` and RevenueCat entitlement `pro`. Configure matching
+Apple/Google subscription products in the RevenueCat dashboard, attach them to the current offering, and set
+these public build variables (never put a secret here):
+
+```text
+EXPO_PUBLIC_REVENUECAT_IOS_API_KEY=appl_...
+EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY=goog_...
+```
+
+### Development override
+
+React Native development runtimes (`__DEV__`) unlock the client-side Pro experience automatically,
+so the paywall, unlimited attachment count, and gated UI can be exercised before store accounts and
+products exist. Set `EXPO_PUBLIC_DEV_PRO_OVERRIDE=false` to test the free experience. The environment
+variable cannot enable the override in a production bundle because `__DEV__` must also be true.
+
+This client override does not forge a server entitlement. After applying the Pro migration to a
+development Supabase project, temporarily grant the signed-in test account from the SQL editor so
+RLS and the AI function permit that account too:
+
+```sql
+insert into public.entitlements (owner_id, entitlement, active, expires_at, updated_at)
+select id, 'pro', true, now() + interval '30 days', now()
+from auth.users
+where email = 'developer@example.com'
+on conflict (owner_id) do update
+set active = true,
+    expires_at = excluded.expires_at,
+    updated_at = now();
+```
+
+Use only a development/test account and replace the example address. The temporary row expires on
+its own; remove it sooner when testing the free or cancellation experience.
+
+The app binds RevenueCat to the signed-in Supabase UUID, so sign-in is required before purchase.
+The `revenuecat-webhook` function receives RevenueCat events with `REVENUECAT_WEBHOOK_SECRET` and
+`SUPABASE_SERVICE_ROLE_KEY`, then applies them transactionally to `public.entitlements`. A private
+event ledger makes retries idempotent, and an older delivery cannot overwrite newer entitlement
+state. Deploy with `supabase functions deploy revenuecat-webhook --no-verify-jwt` and configure the
+dashboard webhook URL with the same secret as its Bearer authorization value. RevenueCat cannot send
+a Supabase user JWT, so this function must bypass gateway JWT verification and authenticate the
+request itself before it touches the service-role key. Apply the
+`202609140001_revenuecat_entitlements.sql` migration first. Real purchases require an iOS/Android
+development build and store sandbox testers; Expo Go cannot exercise native billing. Verify expiry,
+restore, cancellation, refund, and webhook retry behavior with sandbox accounts. Free users keep
+offline features; Pro gates cloud sync writes, attachment transfer, and AI. The 10 MB per-file
+attachment cap remains for Pro.
+
+Dashboard `TEST`, non-Pro, unknown, and `TRANSFER` events are acknowledged without changing access.
+Transfer is deliberately fail-safe because its payload does not contain enough current entitlement
+state to grant access safely; a subsequent identified SDK refresh or lifecycle webhook reconciles the
+destination account. `CANCELLATION`, `BILLING_ISSUE`, and `SUBSCRIPTION_PAUSED` retain access only
+through their current expiration. `EXPIRATION` revokes access.
+
 ## Cloud AI assistance
 
 Cloud AI assistance is an Edge Function, `mobile/supabase/functions/ai-assist`, that proxies three

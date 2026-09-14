@@ -39,7 +39,32 @@
           "color": "#D4F887",
           "defaultChannel": "accountability"
         }
-      ]
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Done Yet? adds your task deadlines to your calendar so they sit alongside the rest of your day."
+        }
+      ],
+      [
+        "react-native-android-widget",
+        {
+          "widgets": [
+            {
+              "name": "NextTask",
+              "label": "Done Yet? — Next task",
+              "description": "Your next task and how many are open",
+              "minWidth": "180dp",
+              "minHeight": "110dp",
+              "targetCellWidth": 3,
+              "targetCellHeight": 2,
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
+            }
+          ]
+        }
+      ],
+      "expo-quick-actions"
     ]
   }
 }

@@ -27,6 +27,9 @@ function ActiveFocusModal({ session, task, dispatch, navigate, error }: Omit<Pro
   const remaining = session.paused
     ? session.remainingSeconds
     : Math.max(0, Math.ceil((Date.parse(session.endsAt) - now) / 1000));
+  // Sessions started before configurable duration existed have no stored length; 5 matches the
+  // product's long-standing default so old copy still reads correctly.
+  const sessionMinutes = session.minutes ?? 5;
 
   return (
     <Modal visible animationType="slide" onRequestClose={() => { void dispatch({ type: 'endFocus' }); }}>
@@ -38,13 +41,19 @@ function ActiveFocusModal({ session, task, dispatch, navigate, error }: Omit<Pro
         </View>
         <ScrollView contentContainerStyle={styles.content}>
           {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
-          <Text style={styles.heading}>{remaining === 0 ? 'Five minutes invested.' : task.title}</Text>
+          <Text style={styles.heading}>{remaining === 0 ? `${sessionMinutes} minute${sessionMinutes === 1 ? '' : 's'} invested.` : task.title}</Text>
           <View style={styles.timerCircle} accessible accessibilityLabel={`${Math.floor(remaining / 60)} minutes ${remaining % 60} seconds remaining`}>
             <Text style={styles.timer}>{Math.floor(remaining / 60).toString().padStart(2, '0')}:{(remaining % 60).toString().padStart(2, '0')}</Text>
             <Text style={styles.caption}>{remaining === 0 ? 'A little more momentum' : session.paused ? 'Paused' : 'Just this next step'}</Text>
           </View>
           <Text style={styles.body}>Your reminders are quiet while you focus.</Text>
-          <Button label="Finished this step" icon="checkmark" onPress={async () => { await dispatch({ type: 'completeTask', id: task.id }); }} />
+          {remaining === 0 ? (
+            // Never automatic: the timer only ever offers another block, it never restarts itself.
+            // Consistent with the reminder contract's "escalation is suggestion-only" — this is the
+            // app suggesting, the user deciding.
+            <Button label="Keep going" icon="play" onPress={async () => { await dispatch({ type: 'startFocus', id: task.id, minutes: sessionMinutes }); }} />
+          ) : null}
+          <Button quiet={remaining === 0} label="Finished this step" icon="checkmark" onPress={async () => { await dispatch({ type: 'completeTask', id: task.id }); }} />
           {remaining > 0 ? <Button quiet label={session.paused ? 'Resume' : 'Pause'} onPress={async () => { await dispatch({ type: session.paused ? 'resumeFocus' : 'pauseFocus' }); }} /> : null}
           <Button quiet label="I’m blocked" onPress={async () => {
             if (await dispatch({ type: 'endFocus' })) navigate('Coach');

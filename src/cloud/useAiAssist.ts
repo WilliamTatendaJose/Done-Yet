@@ -5,6 +5,7 @@ import type { AppState } from '../../../src/domain/types';
 import { createAiClient } from './aiAssist';
 import { getSupabaseConfig } from './config';
 import type { CloudResult, CloudTokenProvider } from './runtime';
+import { proAccessReason, type ProAccess } from './subscriptionPolicy';
 
 export interface AiAssistState {
   /** True only when all three preconditions hold: the user turned the setting on, this build is
@@ -29,17 +30,17 @@ export interface AiAssistState {
  * from useCloudSync's session rather than opening a second one — the ai-assist function requires
  * the same authenticated caller as the rest of cloud sync.
  */
-export function useAiAssist(state: AppState | null, signedIn: boolean, token: CloudTokenProvider): AiAssistState {
+export function useAiAssist(state: AppState | null, signedIn: boolean, access: ProAccess, token: CloudTokenProvider): AiAssistState {
   const config = useMemo(() => getSupabaseConfig(), []);
   const enabled = !!state?.settings.aiAssistEnabled;
-  const available = enabled && !!config && signedIn;
+  const available = enabled && !!config && signedIn && !access.resolving && access.isPro;
   const unavailableReason = !enabled
     ? 'Turn on AI assistance in Settings to use this.'
     : !config
       ? 'Cloud is not configured for this build.'
       : !signedIn
         ? 'Sign in to cloud sync in Settings to use AI assistance.'
-        : '';
+        : proAccessReason(access, 'AI assistance');
   const client = useMemo(() => config ? createAiClient({ url: config.url, apiKey: config.anonKey, token }) : null, [config, token]);
 
   return {

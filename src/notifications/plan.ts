@@ -1,14 +1,28 @@
 import type { AppState, Settings } from '../../../src/domain/types';
-import { nextProjectCheckIn } from '../../../src/domain/engine';
+import { intervalMinutesFor, nextProjectCheckIn } from '../../../src/domain/engine';
 export interface Reminder { id: string; entityId: string; kind: 'task' | 'project'; key: string; at: number; }
 export interface Ledger { entries: Reminder[]; consumed: Record<string, boolean>; }
 export const emptyLedger = (): Ledger => ({ entries: [], consumed: {} });
 export const MAX_PENDING = 48;
-const intervals = { gentle: 30, persistent: 15, firm: 5, relentless: 2 };
+/** Roughly how long the bounded queue covers at a given per-reminder interval, in minutes — the
+ * consequence of picking a short interval, surfaced wherever the user picks one (editor, settings). */
+export function queueCoverageMinutes(intervalMinutes: number): number { return MAX_PENDING * intervalMinutes; }
+function formatMinutes(totalMinutes: number): string {
+  if (totalMinutes % 1440 === 0) { const days = totalMinutes / 1440; return `${days} day${days === 1 ? '' : 's'}`; }
+  if (totalMinutes % 60 === 0) { const hours = totalMinutes / 60; return `${hours} hour${hours === 1 ? '' : 's'}`; }
+  if (totalMinutes < 60) return `${totalMinutes} minutes`;
+  return `${Math.round((totalMinutes / 60) * 10) / 10} hours`;
+}
+/** Calm-voice hint for the consequence of a chosen interval, consistent with "N queued on this
+ * device" in ReleaseSettings.tsx — the goal is a user cannot pick a short interval without seeing
+ * the trade-off. */
+export function describeQueueCoverage(intervalMinutes: number): string {
+  return `About ${formatMinutes(queueCoverageMinutes(intervalMinutes))} of reminders queued on this device.`;
+}
 export function reminderKey(state: AppState, kind: Reminder['kind'], id: string): string | null {
   const item = kind === 'task' ? state.tasks.find(t => t.id === id && t.status === 'todo') : state.projects.find(p => p.id === id && p.progress < 100);
   if (!item) return null;
-  return JSON.stringify(kind === 'task' && 'reminderMode' in item ? [kind, id, item.createdAt, item.dueAt, item.reminderMode, item.reminderLevel, item.snoozedUntil] : [kind, id, item.createdAt, item.dueAt, item.updatedAt]);
+  return JSON.stringify(kind === 'task' && 'reminderMode' in item ? [kind, id, item.createdAt, item.dueAt, item.reminderMode, item.reminderLevel, item.reminderIntervalMinutes, item.snoozedUntil] : [kind, id, item.createdAt, item.dueAt, item.updatedAt]);
 }
 export function outsideQuietHours(at: number, settings: Settings): number | null {
   if (!settings.quietHoursEnabled) return at;
@@ -61,7 +75,7 @@ export function planReminders(state: AppState, previous: Ledger, now: number): L
     if (task.status !== 'todo' || !task.dueAt) continue;
     const key = reminderKey(state, 'task', task.id)!;
     if (task.reminderMode === 'normal' && (consumed[key] || (task.lastRemindedAt && !task.snoozedUntil))) continue;
-    const interval = intervals[task.reminderLevel] * 60000;
+    const interval = intervalMinutesFor(task) * 60000;
     const first = Math.max(Date.parse(task.dueAt), task.snoozedUntil ? Date.parse(task.snoozedUntil) : 0, task.lastRemindedAt ? Date.parse(task.lastRemindedAt) + interval : 0);
     add(task.id, 'task', key, first, task.reminderMode === 'annoy' ? interval : undefined);
   }

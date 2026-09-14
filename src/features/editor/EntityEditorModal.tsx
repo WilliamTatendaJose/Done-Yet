@@ -8,8 +8,10 @@ import type { AppState, Attachment, Milestone, Project, RecurrenceRule, Reminder
 import type { Action } from '../../../../src/state/model';
 import { estimateDuration, type DurationEstimate } from '../../../../src/domain/estimate';
 import { suggestSteps } from '../../../../src/domain/breakdown';
+import { intervals } from '../../../../src/domain/engine';
 import type { AiPayload } from '../../../../src/domain/aiPayload';
 import { parseBreakdownSteps } from '../../../../src/domain/aiResponse';
+import { describeQueueCoverage } from '../../notifications/plan';
 import { Button, Choice, Field, IconButton } from '../../components/ui';
 import { RepeatFields } from './RepeatFields';
 import { TagFields } from './TagFields';
@@ -17,6 +19,8 @@ import { SubtaskFields } from './SubtaskFields';
 import { MilestoneFields } from './MilestoneFields';
 import { AttachmentFields } from './AttachmentFields';
 import { deleteAttachmentFile } from '../attachments/storage';
+import { deleteTaskEvent } from '../calendar/native';
+import { useBusyWarning } from '../calendar/useBusyWarning';
 import type { AttachmentDownloadOutcome } from '../../cloud/useCloudSync';
 import type { AiAssistState } from '../../cloud/useAiAssist';
 import { colors, spacing } from '../../theme';
@@ -55,15 +59,13 @@ interface Props {
   onClose: () => void;
   attachmentSync?: AttachmentSyncProps;
   ai: AiAssistState;
+  isPro?: boolean;
 }
 
 const levels: ReminderLevel[] = ['gentle', 'persistent', 'firm', 'relentless'];
-const intervalText: Record<ReminderLevel, string> = {
-  gentle: '30 min',
-  persistent: '15 min',
-  firm: '5 min',
-  relentless: '2 min',
-};
+// Derived from the single interval table in src/domain/engine.ts, never a second copy.
+const intervalText: Record<ReminderLevel, string> = Object.fromEntries(levels.map(l => [l, `${intervals[l]} min`])) as Record<ReminderLevel, string>;
+const MIN_CUSTOM_INTERVAL = 5, MAX_CUSTOM_INTERVAL = 1440;
 
 export function EntityEditorModal(props: Props) {
   const { selection } = props;
@@ -72,7 +74,7 @@ export function EntityEditorModal(props: Props) {
   return <EditorForm key={`${selection.kind}:${id ?? 'new'}`} {...props} selection={selection} />;
 }
 
-function EditorForm({ selection, state, saving, error, now, dispatch, onClose, attachmentSync, ai }: Props & { selection: NonNullable<EditorSelection> }) {
+function EditorForm({ selection, state, saving, error, now, dispatch, onClose, attachmentSync, ai, isPro }: Props & { selection: NonNullable<EditorSelection> }) {
   const task = selection.kind === 'task' ? selection.task : undefined;
   const project = selection.kind === 'project' ? selection.project : undefined;
   const [title, setTitle] = useState(task?.title ?? project?.title ?? '');
@@ -82,6 +84,12 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
   const [picker, setPicker] = useState<'date' | 'time' | null>(null);
   const [mode, setMode] = useState<Task['reminderMode']>(task?.reminderMode ?? 'normal');
   const [level, setLevel] = useState<ReminderLevel>(task?.reminderLevel ?? state.settings.defaultLevel);
+  // Optional per-task override (5-1440 min), taking precedence over the level above when set.
+  const [customInterval, setCustomInterval] = useState(task?.reminderIntervalMinutes ? String(task.reminderIntervalMinutes) : '');
+  // An empty field means "no override" (null clears it on save); a non-empty one must be in range.
+  const customIntervalMinutes = customInterval.trim() ? Number(customInterval) : null;
+  const customIntervalValid = customIntervalMinutes === null || (Number.isInteger(customIntervalMinutes) && customIntervalMinutes >= MIN_CUSTOM_INTERVAL && customIntervalMinutes <= MAX_CUSTOM_INTERVAL);
+  const effectiveIntervalMinutes = customIntervalValid && customIntervalMinutes !== null ? customIntervalMinutes : intervals[level];
   const [priority, setPriority] = useState<Task['priority']>(task?.priority ?? 'medium');
   const [projectId, setProjectId] = useState<string | null>(task?.projectId ?? null);
   const [repeat, setRepeat] = useState<RecurrenceRule | null>(task?.recurrence ?? null);
@@ -94,6 +102,9 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
   const [aiError, setAiError] = useState('');
 
   const isProject = selection.kind === 'project';
+  // Opt-in, off by default (Settings > "Warn about calendar conflicts"); reads only a narrow window
+  // around this one deadline and never for a project (projects have no reminder/calendar mirroring).
+  const busyWarning = useBusyWarning(!isProject && hasDue && !!state.settings.calendarBusyCheckEnabled, hasDue ? due : null);
   const heading = isProject ? project ? 'Edit project' : 'New project' : task ? 'Edit task' : 'New task';
 
   // On-device only: a rough estimate of how long this task will take, from the user's own finished
@@ -160,7 +171,7 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
 
   async function save() {
     const cleanTitle = title.trim();
-    if (!cleanTitle) return;
+    if (!cleanTitle || (!isProject && mode === 'annoy' && !customIntervalValid)) return;
     let saved: boolean;
     if (isProject) {
       const input = { title: cleanTitle, description: notes, dueAt: due.toISOString(), milestones };
@@ -176,6 +187,7 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
         dueAt: hasDue ? due.toISOString() : null,
         reminderMode: mode,
         reminderLevel: level,
+        reminderIntervalMinutes: customIntervalMinutes,
         recurrence: hasDue ? repeat : null,
         tags,
         subtasks,
@@ -226,6 +238,9 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
                 if (gone.localName) { try { deleteAttachmentFile(gone.localName); } catch { /* orphaned bytes are recoverable */ } }
                 if (gone.remoteKey) void attachmentSync?.enqueueDelete(gone);
               }
+              // The task is gone from state, so useCalendarSync will never see it again to clean this
+              // up itself — best-effort, mirroring the attachment cleanup just above.
+              if (task?.calendarEventId) void deleteTaskEvent(task.calendarEventId);
             }
             if (saved) onClose();
           },
@@ -267,6 +282,8 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
                 <Button quiet label={due.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })} icon="time-outline" onPress={() => setPicker('time')} />
               </View>
               {picker ? <DateTimePicker value={due} mode={picker} themeVariant="dark" onChange={(_, selected) => { if (Platform.OS === 'android') setPicker(null); if (selected) setDue(selected); }} /> : null}
+              {!isProject && busyWarning.result?.busy ? <Text style={styles.caption}>Heads up — {busyWarning.result.count === 1 ? 'an event is' : `${busyWarning.result.count} events are`} already on your calendar around this time.</Text> : null}
+              {!isProject && busyWarning.error ? <Text style={styles.caption}>{busyWarning.error}</Text> : null}
             </> : null}
             {isProject && project ? <View style={styles.wrap}>
               <Button quiet icon="bulb-outline" label="Suggest steps" onPress={suggestProjectSteps} />
@@ -281,11 +298,24 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
             {!isProject && hasDue ? <RepeatFields value={repeat} dueAt={due} onChange={setRepeat} /> : null}
             {!isProject ? <>
               <Field label="Reminder mode"><View style={styles.wrap}><Choice label="Normal" selected={mode === 'normal'} onPress={() => setMode('normal')} /><Choice label="Annoy me" selected={mode === 'annoy'} onPress={() => setMode('annoy')} /></View></Field>
-              {mode === 'annoy' ? <Field label="How persistent?"><View style={styles.wrap}>{levels.map(value => <Choice key={value} label={`${value} · ${intervalText[value]}`} selected={level === value} onPress={() => setLevel(value)} />)}</View></Field> : null}
+              {mode === 'annoy' ? <Field label="How persistent?">
+                <View style={styles.wrap}>{levels.map(value => <Choice key={value} label={`${value} · ${intervalText[value]}`} selected={level === value && !customInterval.trim()} onPress={() => { setLevel(value); setCustomInterval(''); }} />)}</View>
+                <TextInput
+                  accessibilityLabel="Custom reminder interval in minutes"
+                  style={[styles.input, styles.customInterval]}
+                  keyboardType="number-pad"
+                  value={customInterval}
+                  onChangeText={setCustomInterval}
+                  placeholder={`Or a custom interval, ${MIN_CUSTOM_INTERVAL}-${MAX_CUSTOM_INTERVAL} min`}
+                  placeholderTextColor={colors.textMuted}
+                />
+                {!customIntervalValid ? <Text style={styles.fieldError}>Custom interval must be between {MIN_CUSTOM_INTERVAL} and {MAX_CUSTOM_INTERVAL} minutes.</Text>
+                  : <Text style={styles.caption}>{describeQueueCoverage(effectiveIntervalMinutes)}</Text>}
+              </Field> : null}
               <SubtaskFields value={subtasks} onChange={setSubtasks} />
-              <AttachmentFields value={attachments} originalIds={originalAttachmentIds} onChange={setAttachments} downloadAttachment={attachmentSync?.download} />
+              <AttachmentFields value={attachments} originalIds={originalAttachmentIds} onChange={setAttachments} downloadAttachment={attachmentSync?.download} isPro={isPro} />
             </> : null}
-            <Button label="Save" disabled={!title.trim() || saving} onPress={save} />
+            <Button label="Save" disabled={!title.trim() || saving || (!isProject && mode === 'annoy' && !customIntervalValid)} onPress={save} />
             {task || project ? <Button quiet label={`Delete ${isProject ? 'project' : 'task'}`} onPress={confirmDelete} /> : null}
           </ScrollView>
         </KeyboardAvoidingView>
@@ -306,5 +336,7 @@ const styles = StyleSheet.create({
   between: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.sm },
   fieldLabel: { color: colors.text, fontSize: 15, fontWeight: '600' },
   error: { color: colors.errorText, padding: 14, backgroundColor: colors.errorSurface, borderRadius: 12 },
+  fieldError: { color: colors.errorText, fontSize: 12, lineHeight: 18 },
+  customInterval: { marginTop: spacing.sm },
   caption: { color: colors.textMuted, fontSize: 12, lineHeight: 19 },
 });

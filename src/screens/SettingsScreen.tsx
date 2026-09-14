@@ -2,21 +2,23 @@ import { useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import type { AppState, ReminderLevel } from '../../../src/domain/types';
+import { intervals } from '../../../src/domain/engine';
 import { ReleaseSettings } from '../components/ReleaseSettings';
 import { CloudSyncSettings } from '../components/CloudSyncSettings';
 import type { CloudSyncState } from '../cloud/useCloudSync';
 import { AccountModal } from '../features/account/AccountModal';
+import { CalendarSettings } from '../features/calendar/CalendarSettings';
+import { FocusDurationChips } from '../features/focus/FocusDurationChips';
 import type { EscalationCandidate } from '../features/escalation/useEscalationSuggestions';
+import { describeQueueCoverage } from '../notifications/plan';
 import { Button, Choice, Field } from '../components/ui';
 import { colors, radii, spacing } from '../theme';
+import { ProCard } from '../components/ProCard';
+import type { RevenueCatClient } from '../cloud/revenueCat';
 
 const levels: ReminderLevel[] = ['gentle', 'persistent', 'firm', 'relentless'];
-const intervalText: Record<ReminderLevel, string> = {
-  gentle: '30 min',
-  persistent: '15 min',
-  firm: '5 min',
-  relentless: '2 min',
-};
+// intervalText is derived from the single interval table in src/domain/engine.ts, never a second copy.
+const intervalText: Record<ReminderLevel, string> = Object.fromEntries(levels.map(l => [l, `${intervals[l]} min`])) as Record<ReminderLevel, string>;
 
 interface Props {
   state: AppState;
@@ -27,9 +29,10 @@ interface Props {
   cloud: CloudSyncState;
   escalationSuggestions: EscalationCandidate[];
   onApplyEscalation: (id: string, level: ReminderLevel) => void;
+  billing: RevenueCatClient;
 }
 
-export function SettingsScreen({ state, saving, notificationCount, onSettingsChange, onImportSnapshot, cloud, escalationSuggestions, onApplyEscalation }: Props) {
+export function SettingsScreen({ state, saving, notificationCount, onSettingsChange, onImportSnapshot, cloud, escalationSuggestions, onApplyEscalation, billing }: Props) {
   const [accountOpen, setAccountOpen] = useState(false);
   return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
     <Text style={styles.eyebrow}>YOU SET THE PACE</Text>
@@ -41,12 +44,20 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
       importSnapshot={onImportSnapshot}
       count={notificationCount}
     />
-    <CloudSyncSettings {...cloud} onOpenAccount={() => setAccountOpen(true)} />
+    <CloudSyncSettings {...cloud} isPro={billing.state.isPro} proResolving={billing.state.resolving} onOpenAccount={() => setAccountOpen(true)} />
+    <ProCard billing={billing} />
     <AccountModal visible={accountOpen} onClose={() => setAccountOpen(false)} cloud={cloud} state={state} />
+    <CalendarSettings state={state} saving={saving} onSettingsChange={onSettingsChange} />
     <View style={styles.card}>
       <Text style={styles.fieldLabel}>Default persistence</Text>
       <Text style={styles.small}>Applies to new tasks. Each task keeps its own setting.</Text>
       <View style={styles.wrap}>{levels.map(level => <Choice key={level} label={`${level} · ${intervalText[level]}`} selected={state.settings.defaultLevel === level} onPress={() => { void onSettingsChange({ defaultLevel: level }); }} />)}</View>
+      <Text style={styles.small}>{describeQueueCoverage(intervals[state.settings.defaultLevel])} A shorter interval covers less time before you need to reopen the app.</Text>
+    </View>
+    <View style={styles.card}>
+      <Text style={styles.fieldLabel}>Default focus length</Text>
+      <Text style={styles.small}>How long a focus session runs when you start one without picking a length. Five minutes stays the recommended starting point — small is the point.</Text>
+      <FocusDurationChips selected={state.settings.focusMinutes ?? 5} onSelect={minutes => { void onSettingsChange({ focusMinutes: minutes }); }} />
     </View>
     <View style={styles.settingRow}>
       <View style={styles.settingCopy}><Text style={styles.taskTitle}>Pause reminders</Text><Text style={styles.small}>Take a breather whenever you need.</Text></View>
@@ -71,7 +82,7 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
       <View style={styles.settingCopy}>
         <Text style={styles.taskTitle}>AI assistance (cloud)</Text>
         <Text style={styles.small}>
-          Off by default. When you turn this on, three specific actions you tap for yourself can
+          A Pro feature, off by default. When you turn this on, three specific actions you tap for yourself can
           send a small, fixed request to an AI service: breaking a project into steps sends only its
           title, description and days remaining; reading a status update sends only the sentence you
           typed; planning today sends only your open tasks' titles and due times. Nothing else about
@@ -81,7 +92,7 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
           through your account. Turning this off again stops all of it immediately.
         </Text>
       </View>
-      <Switch accessibilityLabel="AI assistance (cloud)" value={!!state.settings.aiAssistEnabled} onValueChange={value => { void onSettingsChange({ aiAssistEnabled: value }); }} trackColor={{ true: colors.accent }} thumbColor={colors.text} />
+      <Switch accessibilityLabel="AI assistance (cloud)" disabled={!billing.state.isPro} value={!!state.settings.aiAssistEnabled && billing.state.isPro} onValueChange={value => { void onSettingsChange({ aiAssistEnabled: value }); }} trackColor={{ true: colors.accent }} thumbColor={colors.text} />
     </View>
     <Field label="Coach personality">
       <View style={styles.wrap}>{(['supportive', 'direct', 'minimal'] as const).map(personality => <Choice key={personality} label={personality} selected={state.settings.personality === personality} onPress={() => { void onSettingsChange({ personality }); }} />)}</View>

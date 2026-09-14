@@ -5,6 +5,7 @@ import type { Attachment } from '../../../../src/domain/types';
 import { deleteAttachmentFile, openAttachment, pickAttachment } from '../attachments/storage';
 import { Button, Field, IconButton } from '../../components/ui';
 import { colors, radii, spacing } from '../../theme';
+import { canAddAttachment, FREE_ATTACHMENT_LIMIT } from './attachmentPolicy';
 
 interface Props {
   value: Attachment[];
@@ -13,9 +14,8 @@ interface Props {
   onChange: (attachments: Attachment[]) => void;
   /** Fetches a remote-only attachment onto this device. Absent when cloud sync is not configured or the user is signed out. */
   downloadAttachment?: (attachment: Attachment) => Promise<{ ok: true; localName: string } | { ok: false; message: string }>;
+  isPro?: boolean;
 }
-
-const MAX_ATTACHMENTS = 10;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -23,12 +23,12 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function AttachmentFields({ value, originalIds, onChange, downloadAttachment }: Props) {
+export function AttachmentFields({ value, originalIds, onChange, downloadAttachment, isPro = false }: Props) {
   const [busy, setBusy] = useState(false);
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const atCap = value.length >= MAX_ATTACHMENTS;
+  const atCap = !canAddAttachment(value.length, isPro);
 
   async function add() {
     setError('');
@@ -36,9 +36,9 @@ export function AttachmentFields({ value, originalIds, onChange, downloadAttachm
     try {
       const attachment = await pickAttachment();
       if (!attachment) return;
-      if (value.length >= MAX_ATTACHMENTS) {
+      if (!canAddAttachment(value.length, isPro)) {
         if (attachment.localName) { try { deleteAttachmentFile(attachment.localName); } catch { /* orphaned bytes are recoverable */ } }
-        setError(`Limit of ${MAX_ATTACHMENTS} attachments reached.`);
+        setError(`Free tasks can have up to ${FREE_ATTACHMENT_LIMIT} attachments. Upgrade to Pro for unlimited attachments.`);
         return;
       }
       onChange([...value, attachment]);
@@ -117,7 +117,7 @@ export function AttachmentFields({ value, originalIds, onChange, downloadAttachm
           {busy ? <ActivityIndicator color={colors.accent} /> : null}
           <Button quiet label={busy ? 'Adding file…' : 'Add a file'} icon="attach-outline" onPress={add} disabled={busy} />
         </View>
-      ) : <Text style={styles.caption}>Limit of {MAX_ATTACHMENTS} attachments reached</Text>}
+      ) : <Text style={styles.caption}>Free plan limit reached: {FREE_ATTACHMENT_LIMIT} attachments. Upgrade to Pro for unlimited attachments.</Text>}
     </Field>
   );
 }
