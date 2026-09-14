@@ -3,25 +3,31 @@ const mocks = vi.hoisted(() => ({
   raw: null as string | null,
   pending: [] as { identifier: string; content: { data: Record<string, unknown> } }[],
   granted: true,
+  channelImportance: 6,
   schedule: vi.fn(), cancel: vi.fn(),
 }));
-vi.mock('react-native', () => ({ Platform: { OS: 'android' } }));
+vi.mock('react-native', () => ({ Platform: { OS: 'android', Version: 36 } }));
 vi.mock('../state/database', () => ({ readMetadata: async () => mocks.raw, writeMetadata: async (_: string, value: string) => { mocks.raw = value; } }));
 vi.mock('expo-notifications', () => ({
   setNotificationHandler: vi.fn(), setNotificationCategoryAsync: vi.fn(),
+  setNotificationChannelAsync: async () => ({ importance: mocks.channelImportance }),
   getPermissionsAsync: async () => ({ granted: mocks.granted }),
+  requestPermissionsAsync: async () => ({ granted: mocks.granted }),
   getAllScheduledNotificationsAsync: async () => mocks.pending,
   getPresentedNotificationsAsync: async () => [],
   cancelScheduledNotificationAsync: mocks.cancel,
   scheduleNotificationAsync: mocks.schedule,
-  SchedulableTriggerInputTypes: { DATE: 'date' },
+  SchedulableTriggerInputTypes: { DATE: 'date', TIME_INTERVAL: 'timeInterval' },
+  AndroidImportance: { NONE: 2, HIGH: 6 },
+  AndroidNotificationVisibility: { PRIVATE: 2 },
+  AndroidNotificationPriority: { HIGH: 'high' },
 }));
 import * as Notifications from 'expo-notifications';
-import { reconcileNotifications, responseAction } from './native';
+import { ACCOUNTABILITY_CHANNEL_ID, reconcileNotifications, responseAction, sendTestNotification } from './native';
 import { initialState } from '../../../src/state/model';
 import { reminderKey } from './plan';
 function state() { const s = initialState(); s.settings = { ...s.settings, nativeNotificationsEnabled: true, quietHoursEnabled: false }; s.projects = []; s.tasks = [{ ...s.tasks[0], projectId: null, reminderMode: 'normal', dueAt: new Date(Date.now() + 300000).toISOString() }]; return s; }
-beforeEach(() => { mocks.raw = null; mocks.pending = []; mocks.granted = true; mocks.cancel.mockReset(); mocks.schedule.mockReset().mockImplementation(async (request: { identifier: string; content: { data: Record<string, unknown> } }) => { mocks.pending.push(request); return request.identifier; }); });
+beforeEach(() => { mocks.raw = null; mocks.pending = []; mocks.granted = true; mocks.channelImportance = 6; mocks.cancel.mockReset(); mocks.schedule.mockReset().mockImplementation(async (request: { identifier: string; content: { data: Record<string, unknown> } }) => { mocks.pending.push(request); return request.identifier; }); });
 describe('OS notification reconciliation', () => {
   it('does not duplicate an already scheduled request', async () => {
     const s = state(); await reconcileNotifications(s); await reconcileNotifications(s);
@@ -36,6 +42,23 @@ describe('OS notification reconciliation', () => {
   it('does not schedule when permission is denied', async () => {
     mocks.granted = false; const result = await reconcileNotifications(state());
     expect(result.granted).toBe(false); expect(mocks.schedule).not.toHaveBeenCalled();
+  });
+  it('does not schedule when the Android notification channel is blocked', async () => {
+    mocks.channelImportance = 2;
+    const result = await reconcileNotifications(state());
+    expect(result.granted).toBe(false); expect(mocks.schedule).not.toHaveBeenCalled();
+  });
+  it('uses the visible high-priority channel and sound for task reminders', async () => {
+    await reconcileNotifications(state());
+    const scheduled = mocks.schedule.mock.calls[0][0];
+    expect(scheduled.trigger.channelId).toBe(ACCOUNTABILITY_CHANNEL_ID);
+    expect(scheduled.content.sound).toBe('default');
+  });
+  it('schedules a short diagnostic reminder outside the planner', async () => {
+    expect(await sendTestNotification()).toBe(true);
+    const scheduled = mocks.schedule.mock.calls[0][0];
+    expect(scheduled.identifier).toMatch(/^notification_test_/);
+    expect(scheduled.trigger).toMatchObject({ type: 'timeInterval', seconds: 2, channelId: ACCOUNTABILITY_CHANNEL_ID });
   });
   it('does not record failed schedules as delivered and retries later', async () => {
     mocks.schedule.mockRejectedValueOnce(Error('OS unavailable'));

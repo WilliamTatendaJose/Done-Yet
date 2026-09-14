@@ -17,6 +17,9 @@
       "bundleIdentifier": "com.doneyet.app"
     },
     "android": {
+      "permissions": [
+        "android.permission.SCHEDULE_EXACT_ALARM"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#101410",
         "foregroundImage": "./assets/android-icon-foreground-brand.png",
@@ -37,7 +40,7 @@
         {
           "icon": "./assets/android-icon-foreground-brand.png",
           "color": "#D4F887",
-          "defaultChannel": "accountability"
+          "defaultChannel": "accountability-v2"
         }
       ],
       [

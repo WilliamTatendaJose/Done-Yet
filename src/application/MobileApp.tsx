@@ -54,7 +54,7 @@ export function MobileApp() {
     state,
     now,
     editorOpen: editor !== null,
-    backgroundDeliveryAvailable: notifications.status === 'available',
+    backgroundDeliveryAvailable: notifications.status === 'available' && notifications.count > 0,
     dispatch,
   });
   const { celebration, clear: clearCelebration } = useCompletionCelebration(state, now);

@@ -8,11 +8,64 @@ import { emptyLedger, planReminders, reminderKey, type Ledger } from './plan';
 
 const LEDGER_KEY = 'notification_ledger_v1';
 const SCHEDULE_BATCH_SIZE = 8;
-Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false }) });
+export const ACCOUNTABILITY_CHANNEL_ID = 'accountability-v2';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    priority: Notifications.AndroidNotificationPriority.HIGH,
+  }),
+});
+
+async function ensureNotificationChannel(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  const channel = await Notifications.setNotificationChannelAsync(ACCOUNTABILITY_CHANNEL_ID, {
+    name: 'Accountability reminders',
+    description: 'Task deadlines, follow-ups, and project check-ins',
+    importance: Notifications.AndroidImportance.HIGH,
+    lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
+    sound: 'default',
+    enableVibrate: true,
+    vibrationPattern: [0, 250, 150, 250],
+  });
+  // Channel APIs are a no-op below Android 8. On newer Android versions a channel whose
+  // importance is NONE was explicitly disabled by the user and must not suppress our in-app fallback.
+  return channel === null || channel.importance !== Notifications.AndroidImportance.NONE;
+}
+
+async function notificationDeliveryAvailable(): Promise<boolean> {
+  const channelAvailable = await ensureNotificationChannel();
+  return channelAvailable && (await Notifications.getPermissionsAsync()).granted;
+}
+
 export async function requestNotificationPermission() {
-  if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('accountability', { name: 'Accountability reminders', importance: Notifications.AndroidImportance.DEFAULT, lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE });
+  await ensureNotificationChannel();
   const current = await Notifications.getPermissionsAsync();
-  return current.granted || (await Notifications.requestPermissionsAsync()).granted;
+  const granted = current.granted || (await Notifications.requestPermissionsAsync()).granted;
+  return granted && await ensureNotificationChannel();
+}
+
+/** Schedules a prompt that bypasses the app's reminder planner and quiet hours. */
+export async function sendTestNotification(): Promise<boolean> {
+  if (!(await notificationDeliveryAvailable())) return false;
+  await Notifications.scheduleNotificationAsync({
+    identifier: `notification_test_${Date.now()}`,
+    content: {
+      title: 'Done Yet? notifications work',
+      body: 'This test reminder came from your device.',
+      sound: 'default',
+      data: { owner: 'done-yet-test' },
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds: 2,
+      channelId: ACCOUNTABILITY_CHANNEL_ID,
+    },
+  });
+  return true;
 }
 let chain: Promise<unknown> = Promise.resolve();
 export function reconcileNotifications(state: AppState) {
@@ -31,7 +84,7 @@ export function reconcileNotifications(state: AppState) {
       const d = request.content.data ?? {};
       if (d.owner === 'done-yet' && typeof d.at === 'number' && typeof d.entityId === 'string' && (d.kind === 'task' || d.kind === 'project') && typeof d.key === 'string' && !previous.entries.some(e => e.id === request.identifier)) previous.entries.push({ id: request.identifier, entityId: d.entityId, kind: d.kind, key: d.key, at: d.at });
     }
-    const granted = (await Notifications.getPermissionsAsync()).granted;
+    const granted = await notificationDeliveryAvailable();
     const effective = granted ? state : { ...state, settings: { ...state.settings, nativeNotificationsEnabled: false } };
     const next = planReminders(effective, previous, Date.now());
     const wanted = new Set(next.entries.map(e => e.id));
@@ -70,8 +123,8 @@ export function reconcileNotifications(state: AppState) {
           const content = task ? reminderContent(task, task.reminderLevel, state.settings.personality) : { title: 'Done Yet?', body: reminder.kind === 'task' ? 'One small step is waiting. Open to continue.' : 'Time for a project progress check-in.' };
           await Notifications.scheduleNotificationAsync({
             identifier: reminder.id,
-            content: { title: content.title, body: reminder.kind === 'task' ? content.body : 'Time for a project progress check-in.', categoryIdentifier: reminder.kind === 'task' ? 'DONEYET' : 'DONEYET_PROJECT', data: { owner: 'done-yet', ...reminder } },
-            trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: new Date(reminder.at), channelId: 'accountability' },
+            content: { title: content.title, body: reminder.kind === 'task' ? content.body : 'Time for a project progress check-in.', sound: 'default', categoryIdentifier: reminder.kind === 'task' ? 'DONEYET' : 'DONEYET_PROJECT', data: { owner: 'done-yet', ...reminder } },
+            trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: new Date(reminder.at), channelId: ACCOUNTABILITY_CHANNEL_ID },
           });
           return reminder;
         }));
@@ -128,4 +181,3 @@ export function responseAction(state: AppState, data: Record<string, unknown>, i
   }
   return null;
 }
-
