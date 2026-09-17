@@ -11,7 +11,8 @@ const ITEMS: QuickActions.Action[] = [
   { id: 'add-task', title: 'Add a task', subtitle: 'Capture the next small step', icon: 'compose', params: { href: 'doneyet://add-task' } },
   { id: 'focus', title: 'Start a focus session', subtitle: 'Five minutes on the next thing', icon: 'play', params: { href: 'doneyet://focus' } },
 ];
-const toAction = (id: string | undefined): ShortcutAction | null => (id === 'add-task' || id === 'focus' ? id : null);
+const toAction = (id: string | undefined): ShortcutAction | null =>
+  id === 'add-task' ? { kind: 'add-task' } : id === 'focus' ? { kind: 'focus', taskId: null } : null;
 
 export function useQuickActions(onAction: (action: ShortcutAction) => void) {
   const handler = useRef(onAction); handler.current = onAction;

@@ -43,6 +43,17 @@ export function createController(repository: StateRepository, clock = () => new 
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     load,
     dispatch: (action: Action) => { const now = clock(); return transact(state => state ? reduce(state, action, now) : null); },
+    /**
+     * Applies actions raised while the app was not running — today, home-screen widget button
+     * presses drained out of state/commandQueue.ts — as one durable write, each at the time it was
+     * actually made rather than the time it is being applied, so a "snooze 15m" tapped an hour ago
+     * does not quietly become fifteen minutes from now.
+     *
+     * Resolves false without writing when state has not loaded yet, which is the caller's signal to
+     * leave the commands queued rather than dropping them.
+     */
+    applyQueued: (commands: ReadonlyArray<{ action: Action; at: Date }>) =>
+      transact(state => state ? commands.reduce((current, command) => reduce(current, command.action, command.at), state) : null),
     replace: (raw: string) => { const imported = decodeState(raw); return transact(() => ({ ...imported, focus: null, settings: { ...imported.settings, nativeNotificationsEnabled: false } })); },
     /** Apply a validated cloud snapshot while keeping device-only notification consent. */
     replaceRemote: (raw: string) => transact(current => {

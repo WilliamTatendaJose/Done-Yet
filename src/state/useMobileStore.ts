@@ -5,5 +5,5 @@ export function useMobileStore() {
   const [controller] = useState(() => createController(repository));
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useEffect(() => { void controller.load(); }, [controller]);
-  return { ...snapshot, dispatch: controller.dispatch, retry: controller.load, importSnapshot: controller.replace, replaceRemote: controller.replaceRemote };
+  return { ...snapshot, dispatch: controller.dispatch, retry: controller.load, importSnapshot: controller.replace, replaceRemote: controller.replaceRemote, applyQueued: controller.applyQueued };
 }

@@ -2,7 +2,7 @@ import * as SQLite from 'expo-sqlite';
 let opening: Promise<SQLite.SQLiteDatabase> | undefined;
 export function database() {
   if (!opening) opening = SQLite.openDatabaseAsync('done-yet.db').then(async db => {
-    await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+    await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS pending_commands (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, at TEXT NOT NULL);');
     return db;
   }).catch(error => { opening = undefined; throw error; });
   return opening;
@@ -20,3 +20,4 @@ export const repository = {
 };
 export async function readMetadata(key: string) { return (await (await database()).getFirstAsync<{ value: string }>('SELECT value FROM app_metadata WHERE key=?', key))?.value ?? null; }
 export async function writeMetadata(key: string, value: string) { await (await database()).runAsync('INSERT OR REPLACE INTO app_metadata(key,value) VALUES (?,?)', key, value); }
+export async function deleteMetadata(key: string) { await (await database()).runAsync('DELETE FROM app_metadata WHERE key=?', key); }

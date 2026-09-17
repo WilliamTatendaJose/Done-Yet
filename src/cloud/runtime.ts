@@ -22,7 +22,15 @@ export interface CloudDocument {
 
 export type CloudResult<T> =
   | { status: 'success'; value: T; version: string | null; httpStatus: number }
-  | { status: Exclude<CloudStatus, 'success'>; message: string; httpStatus?: number };
+  | {
+      status: Exclude<CloudStatus, 'success'>;
+      message: string;
+      httpStatus?: number;
+      /** How long the service asked us to wait, from a `Retry-After` header (429/503). Present only
+       * when the server actually said so — the caller's own backoff applies otherwise. Honouring it
+       * is what keeps a rate-limited client from making the rate limiting worse. */
+      retryAfterMs?: number;
+    };
 
 export interface CloudTokenProvider {
   (): string | null | Promise<string | null>;
@@ -64,11 +72,39 @@ export function isCloudSuccess<T>(result: CloudResult<T>): result is Extract<Clo
   return result.status === 'success';
 }
 
-function failure(status: Exclude<CloudStatus, 'success'>, message: string, httpStatus?: number): CloudResult<never> {
-  return httpStatus === undefined ? { status, message } : { status, message, httpStatus };
+function failure(status: Exclude<CloudStatus, 'success'>, message: string, httpStatus?: number, retryAfterMs?: number): CloudResult<never> {
+  return {
+    status,
+    message,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+  };
+}
+
+/** A day is already far past any delay worth holding a sync for, and guards against a header that
+ * is absurd or hostile. */
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
+
+/**
+ * `Retry-After` in either form the spec allows: delay-seconds, or an HTTP date. Anything
+ * unparseable, negative or absurd is ignored rather than trusted, leaving the caller's own backoff
+ * to decide.
+ */
+export function retryAfterMs(header: string | null, now: Date): number | undefined {
+  if (!header) return undefined;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) {
+    const ms = Number(value) * 1000;
+    return ms >= 0 && ms <= MAX_RETRY_AFTER_MS ? ms : undefined;
+  }
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return undefined;
+  const ms = at - now.getTime();
+  return ms > 0 && ms <= MAX_RETRY_AFTER_MS ? ms : undefined;
 }
 
 function messageFor(response: Response) {
+  if (response.status === 429) return 'The cloud service is busy. Try again shortly.';
   if (response.status === 401 || response.status === 403) return 'Cloud account authorization was rejected.';
   if (response.status === 404) return 'No cloud copy exists yet.';
   if (response.status === 409 || response.status === 412) return 'The cloud copy changed on another device.';
@@ -97,7 +133,7 @@ async function request(options: CloudHttpClientOptions, url: string, init: Reque
     const token = await options.token?.();
     if (token?.trim()) headers.Authorization = `Bearer ${token.trim()}`;
     const response = await fetcher(url, { ...init, headers, signal: controller.signal });
-    if (!response.ok) return failure(statusFor(response), messageFor(response), response.status);
+    if (!response.ok) return failure(statusFor(response), messageFor(response), response.status, retryAfterMs(response.headers.get('retry-after'), new Date()));
     return { status: 'success', value: response, version: responseVersion(response), httpStatus: response.status };
   } catch (error) {
     if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) return failure('timeout', 'Cloud sync timed out.');

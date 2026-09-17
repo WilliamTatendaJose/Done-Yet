@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createCloudHttpClient, createSupabaseRestClient, isCloudSuccess } from './runtime';
+import { createCloudHttpClient, createSupabaseRestClient, isCloudSuccess, retryAfterMs } from './runtime';
 
 const response = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 
@@ -91,5 +91,44 @@ describe('supabase gateway api key', () => {
     const client = createSupabaseRestClient({ url: 'https://project.supabase.co', table: 'app_states', documentId: 'user-1', documentIdColumn: 'owner_id', apiKey: 'publishable-key', token: () => 'user-token', fetch: fetcher });
     await client.push('{}', null);
     expect(seen.every(h => h.apikey === 'publishable-key')).toBe(true);
+  });
+});
+
+describe('Retry-After', () => {
+  const now = new Date('2026-09-16T10:00:00.000Z');
+
+  it('reads a delay in seconds', () => {
+    expect(retryAfterMs('120', now)).toBe(120_000);
+    expect(retryAfterMs('0', now)).toBe(0);
+  });
+
+  it('reads an HTTP date as the wait remaining from now', () => {
+    expect(retryAfterMs('Wed, 16 Sep 2026 10:00:30 GMT', now)).toBe(30_000);
+  });
+
+  it('ignores a date that has already passed rather than scheduling into the past', () => {
+    expect(retryAfterMs('Wed, 16 Sep 2026 09:59:00 GMT', now)).toBeUndefined();
+  });
+
+  it('ignores anything unparseable, absurd or absent, leaving our own backoff to decide', () => {
+    expect(retryAfterMs(null, now)).toBeUndefined();
+    expect(retryAfterMs('soon', now)).toBeUndefined();
+    expect(retryAfterMs('-5', now)).toBeUndefined();
+    // Past a day it is no longer a delay worth holding a sync for.
+    expect(retryAfterMs(String(48 * 60 * 60), now)).toBeUndefined();
+  });
+
+  it('carries the service’s own wait back to the caller on a rate limit', async () => {
+    const fetch = vi.fn(async () => response({ error: 'slow down' }, 429, { 'Retry-After': '30' }));
+    const result = await createCloudHttpClient({ endpoint: 'https://api.example.test/state/me', fetch }).pull();
+    expect(result.status).toBe('server-error');
+    expect(result.status !== 'success' && result.retryAfterMs).toBe(30_000);
+    expect(result.status !== 'success' && result.message).toContain('busy');
+  });
+
+  it('leaves it absent when the service did not say', async () => {
+    const fetch = vi.fn(async () => response({ error: 'down' }, 503));
+    const result = await createCloudHttpClient({ endpoint: 'https://api.example.test/state/me', fetch }).pull();
+    expect(result.status !== 'success' && result.retryAfterMs).toBeUndefined();
   });
 });

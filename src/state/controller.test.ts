@@ -42,6 +42,40 @@ describe('durable mobile commands', () => {
     expect(await store.replace(JSON.stringify(backup))).toBe(true);
     expect(store.getSnapshot().state?.settings.nativeNotificationsEnabled).toBe(false);
   });
+  it('applies queued commands at the time each was raised, not the time they are drained', async () => {
+    const db = memory(JSON.stringify(initialState(now))); const store = createController(db.repository, () => now); await store.load();
+    const raised = new Date('2026-09-12T09:00:00Z');
+    expect(await store.applyQueued([{ action: { type: 'snoozeTask', id: 'sample-outline', minutes: 15 }, at: raised }])).toBe(true);
+    // 09:15, from when the button was pressed — not 10:15, an hour later, when the app was reopened.
+    expect(store.getSnapshot().state?.tasks[0].snoozedUntil).toBe('2026-09-12T09:15:00.000Z');
+  });
+  it('applies a batch of queued commands in order, as one save', async () => {
+    const db = memory(JSON.stringify(initialState(now))); const store = createController(db.repository, () => now); await store.load();
+    let writes = 0; const write = db.repository.write; db.repository.write = async next => { writes++; await write(next); };
+    expect(await store.applyQueued([
+      { action: { type: 'snoozeTask', id: 'sample-outline', minutes: 15 }, at: now },
+      { action: { type: 'completeTask', id: 'sample-outline' }, at: now },
+    ])).toBe(true);
+    expect(store.getSnapshot().state?.tasks[0].status).toBe('done');
+    expect(writes).toBe(1);
+  });
+  it('refuses to apply queued commands before state has loaded, so they stay queued', async () => {
+    const db = memory(JSON.stringify(initialState(now))); const store = createController(db.repository, () => now);
+    expect(await store.applyQueued([{ action: { type: 'completeTask', id: 'sample-outline' }, at: now }])).toBe(false);
+    await store.load(); expect(store.getSnapshot().state?.tasks[0].status).toBe('todo');
+  });
+  it('reports success for a queued command the app has already made moot, so it stops being queued', async () => {
+    const db = memory(JSON.stringify(initialState(now))); const store = createController(db.repository, () => now); await store.load();
+    await store.dispatch({ type: 'completeTask', id: 'sample-outline' });
+    expect(await store.applyQueued([{ action: { type: 'completeTask', id: 'sample-outline' }, at: now }])).toBe(true);
+    expect(store.getSnapshot().state?.tasks[0].status).toBe('done');
+  });
+  it('keeps queued commands when the save fails', async () => {
+    const db = memory(JSON.stringify(initialState(now))); const store = createController(db.repository, () => now); await store.load();
+    db.repository.write = async () => { throw Error('disk full'); };
+    expect(await store.applyQueued([{ action: { type: 'completeTask', id: 'sample-outline' }, at: now }])).toBe(false);
+    expect(store.getSnapshot().state?.tasks[0].status).toBe('todo');
+  });
   it('does not reopen a task when a completion action is delivered twice', async () => {
     const db = memory(JSON.stringify(initialState(now))); const store = createController(db.repository, () => now); await store.load();
     await Promise.all([store.dispatch({ type: 'completeTask', id: 'sample-outline' }), store.dispatch({ type: 'completeTask', id: 'sample-outline' })]);

@@ -8,6 +8,7 @@ import { CloudSyncSettings } from '../components/CloudSyncSettings';
 import type { CloudSyncState } from '../cloud/useCloudSync';
 import { AccountModal } from '../features/account/AccountModal';
 import { CalendarSettings } from '../features/calendar/CalendarSettings';
+import { WidgetSettings } from '../features/widget/WidgetSettings';
 import { FocusDurationChips } from '../features/focus/FocusDurationChips';
 import type { EscalationCandidate } from '../features/escalation/useEscalationSuggestions';
 import { describeQueueCoverage } from '../notifications/plan';
@@ -48,6 +49,7 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
     <ProCard billing={billing} />
     <AccountModal visible={accountOpen} onClose={() => setAccountOpen(false)} cloud={cloud} state={state} />
     <CalendarSettings state={state} saving={saving} onSettingsChange={onSettingsChange} />
+    <WidgetSettings />
     <View style={styles.card}>
       <Text style={styles.fieldLabel}>Default persistence</Text>
       <Text style={styles.small}>Applies to new tasks. Each task keeps its own setting.</Text>

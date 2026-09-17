@@ -7,8 +7,10 @@ import { useMobileStore } from '../state/useMobileStore';
 import { useNotifications } from '../notifications/useNotifications';
 import { useCalendarSync } from '../features/calendar/useCalendarSync';
 import { useShortcutLink } from '../features/shortcuts/useShortcutLink';
+import type { ShortcutAction } from '../features/shortcuts/deepLink';
 import { useQuickActions } from '../features/shortcuts/useQuickActions';
 import { updateWidget } from '../features/widget/updateWidget';
+import { useWidgetCommands } from '../features/widget/useWidgetCommands';
 import { useAppClock } from '../hooks/useAppClock';
 import { useInAppReminder } from '../features/reminders/useInAppReminder';
 import { useEscalationSuggestions } from '../features/escalation/useEscalationSuggestions';
@@ -35,7 +37,7 @@ import type { ProAccess } from '../cloud/subscriptionPolicy';
 const priorityRank: Record<Task['priority'], number> = { high: 0, medium: 1, low: 2 };
 
 export function MobileApp() {
-  const { state, error, saving, dispatch, retry, importSnapshot, replaceRemote } = useMobileStore();
+  const { state, error, saving, dispatch, retry, importSnapshot, replaceRemote, applyQueued } = useMobileStore();
   const [tab, setTab] = useState<TabName>('Today');
   const [editor, setEditor] = useState<EditorSelection>(null);
   const now = useAppClock(30_000);
@@ -64,23 +66,40 @@ export function MobileApp() {
   // headless task handler (registerWidgetTaskHandler) covers the OS's periodic background refresh.
   useEffect(() => { if (state) void updateWidget(state); }, [state]);
 
-  // One handler for all three routes into the same two actions: a long-press launcher shortcut,
-  // an Assistant intent built on it, and a plain `doneyet://` link.
+  // The other direction: Done/Snooze pressed on the widget while the app was closed, applied here
+  // so the reducer stays the only writer of the snapshot.
+  useWidgetCommands(Boolean(state), applyQueued);
+
+  // One handler for every route into these actions: a long-press launcher shortcut, an Assistant
+  // intent built on it, a tap on a region of the home-screen widget, and a plain `doneyet://` link.
   //
-  // A cold start delivers the action before SQLite has loaded, so "focus" cannot pick a task yet.
-  // Park it and run it once tasks exist, otherwise the shortcut silently does nothing — which is
-  // exactly how it failed on device before this was added.
-  const [pendingShortcut, setPendingShortcut] = useState<'add-task' | 'focus' | null>(null);
-  const runShortcut = useCallback((action: 'add-task' | 'focus') => {
-    if (action === 'add-task') { setEditor({ kind: 'task' }); return; }
-    setPendingShortcut('focus');
+  // A cold start delivers the action before SQLite has loaded, so anything that needs a task —
+  // "focus", or opening the one the widget named — cannot resolve it yet. Park it and run it once
+  // tasks exist, otherwise the shortcut silently does nothing — which is exactly how it failed on
+  // device before this was added.
+  const [pendingShortcut, setPendingShortcut] = useState<ShortcutAction | null>(null);
+  const runShortcut = useCallback((action: ShortcutAction) => {
+    if (action.kind === 'add-task') { setEditor({ kind: 'task' }); return; }
+    if (action.kind === 'open-tasks') { setTab('Tasks'); return; }
+    setPendingShortcut(action);
   }, []);
   useShortcutLink(runShortcut);
   useQuickActions(runShortcut);
   useEffect(() => {
-    if (pendingShortcut !== 'focus' || !state) return;
-    const target = orderedTasks[0];
+    if (!pendingShortcut || !state) return;
     setPendingShortcut(null);
+    if (pendingShortcut.kind === 'open-task') {
+      // A task the widget named can have been completed or deleted since it was rendered — the
+      // widget's copy is at most `updatePeriodMillis` old. Fall back to the list rather than
+      // opening an editor on nothing.
+      const target = state.tasks.find(task => task.id === pendingShortcut.taskId);
+      setTab('Tasks');
+      if (target) setEditor({ kind: 'task', task: target });
+      return;
+    }
+    if (pendingShortcut.kind !== 'focus') return;
+    const named = pendingShortcut.taskId ? state.tasks.find(task => task.id === pendingShortcut.taskId && task.status === 'todo') : undefined;
+    const target = named ?? orderedTasks[0];
     if (target) void dispatch({ type: 'startFocus', id: target.id });
   }, [pendingShortcut, state, orderedTasks, dispatch]);
 

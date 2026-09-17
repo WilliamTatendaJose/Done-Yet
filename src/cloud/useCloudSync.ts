@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState as DeviceAppState } from 'react-native';
 import type { Action } from '../../../src/state/model';
 import type { AppState, Attachment } from '../../../src/domain/types';
 import { decodeState } from '../../../src/state/storage';
@@ -8,8 +9,9 @@ import { createSupabaseAuthClient, type AuthResult } from './auth';
 import { createAttachmentsClient } from './attachments';
 import { drainAttachmentQueue, enqueueAttachmentDelete, enqueueAttachmentUpload } from './attachmentSync';
 import { getSupabaseConfig } from './config';
-import { createSupabaseRestClient, isCloudSuccess, type CloudDocument, type CloudSyncClient, type CloudTokenProvider } from './runtime';
+import { createSupabaseRestClient, isCloudSuccess, type CloudDocument, type CloudStatus, type CloudSyncClient, type CloudTokenProvider } from './runtime';
 import { createSecureCloudSessionStore, useCloudSession, type CloudSession } from './session';
+import { afterFailure, afterWake, msUntilDue, noRetry, retryMessage, type SyncRetryState } from './syncRetry';
 import { proAccessReason, type ProAccess } from './subscriptionPolicy';
 
 export type { ProAccess } from './subscriptionPolicy';
@@ -66,6 +68,9 @@ function errorMessage(result: { status: string; message?: string }) {
   return result.message ?? 'Cloud sync could not be completed.';
 }
 
+/** A sync outcome that carries enough to decide whether trying again could help. */
+type Failure = { status: CloudStatus; message?: string; retryAfterMs?: number };
+
 /** Bounds the pull/merge/push retry loop when another writer wins the compare-and-swap in between. */
 const MAX_MERGE_ATTEMPTS = 3;
 
@@ -99,6 +104,12 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const clientRef = useRef<CloudSyncClient | null>(null);
   const initialSyncUserRef = useRef<string | null>(null);
+  // One sync at a time. The initial sync, the periodic tick, a retry and the Sync button can all
+  // fire at once; overlapping pull/merge/push cycles would fight each other for the compare-and-swap
+  // and turn a healthy sync into a conflict loop. Callers join the run already in flight instead.
+  const inFlightRef = useRef<Promise<boolean> | null>(null);
+  const retryRef = useRef<SyncRetryState>(noRetry);
+  const [retry, setRetry] = useState<SyncRetryState>(noRetry);
   const auth = useMemo(() => config ? createSupabaseAuthClient(config) : null, [config]);
   const stateRef = useRef<AppState | null>(state);
 
@@ -148,6 +159,25 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   }, []);
 
   /**
+   * Every way a sync can fail goes through here, so the decision "is this worth trying again on its
+   * own" is made in exactly one place (see syncRetry.ts) rather than at a dozen call sites. A
+   * failure that retrying cannot fix clears the backoff instead of scheduling one.
+   */
+  const fail = useCallback((result: Failure, message?: string) => {
+    const next = afterFailure(retryRef.current, result.status, new Date(), Math.random(), result.retryAfterMs);
+    retryRef.current = next;
+    setRetry(next);
+    setStatus('error');
+    setMessage(retryMessage(next, message ?? errorMessage(result)));
+    return false;
+  }, []);
+
+  /** Something that failed for a local reason, which no amount of retrying changes. */
+  const failLocally = useCallback((message: string) => fail({ status: 'request-error' }, message), [fail]);
+
+  const succeed = useCallback(() => { retryRef.current = noRetry; setRetry(noRetry); }, []);
+
+  /**
    * Merges `localState` with the already-pulled `remoteDoc` (see mergeStates)
    * and applies the result on this device, then pushes it back with the CAS
    * `expectedVersion` from that pull. If another writer won the compare-and-
@@ -158,11 +188,11 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
   const applyMerge = useCallback(async (localState: AppState, session: CloudSession, remoteDoc: CloudDocument, expectedVersion: string | null, attempt: number): Promise<boolean> => {
     let remoteState: AppState;
     try { remoteState = decodeState(remoteDoc.snapshot); }
-    catch { setStatus('error'); setMessage('The cloud copy is invalid. Your device data was not changed.'); return false; }
+    catch { return failLocally('The cloud copy is invalid. Your device data was not changed.'); }
     const { state: merged, tookLocal, tookRemote } = mergeStates(localState, remoteState, new Date());
     const serialized = JSON.stringify(merged);
     const applied = await replaceRemote(serialized);
-    if (!applied) { setStatus('error'); setMessage('The merged copy could not be saved on this device.'); return false; }
+    if (!applied) return failLocally('The merged copy could not be saved on this device.');
     let client = clientRef.current ?? clientFor(session);
     if (!client) return false;
     clientRef.current = client;
@@ -177,19 +207,23 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
       }
     }
     if (pushed.status === 'conflict') {
-      if (attempt >= MAX_MERGE_ATTEMPTS) { setStatus('error'); setMessage("Cloud sync couldn't settle after a few tries. Try again shortly."); return false; }
+      // The bounded loop above handles contention happening right now; past that, backing off and
+      // coming back later is the only thing that helps a document another device keeps rewriting.
+      if (attempt >= MAX_MERGE_ATTEMPTS) return fail({ status: 'conflict' }, "Cloud sync couldn't settle after a few tries.");
       const rePulled = await client.pull();
-      if (!isCloudSuccess(rePulled)) { setStatus('error'); setMessage(errorMessage(rePulled)); return false; }
+      if (!isCloudSuccess(rePulled)) return fail(rePulled);
       return applyMerge(merged, session, rePulled.value, rePulled.version, attempt + 1);
     }
-    if (!isCloudSuccess(pushed)) { setStatus('error'); setMessage(errorMessage(pushed)); return false; }
+    if (!isCloudSuccess(pushed)) return fail(pushed);
     await saveSyncMarker(pushed.version);
+    succeed();
     setStatus('synced');
     setMessage(summarizeMerge(tookLocal, tookRemote));
     return true;
-  }, [auth, clientFor, refreshSession, replaceRemote, saveSyncMarker]);
+  }, [auth, clientFor, fail, failLocally, refreshSession, replaceRemote, saveSyncMarker, succeed]);
 
-  const syncWith = useCallback(async (local: AppState | null, session: CloudSession): Promise<boolean> => {
+  /** One pull/merge/push pass. Always call it through `syncWith`, which keeps runs from overlapping. */
+  const runSync = useCallback(async (local: AppState | null, session: CloudSession): Promise<boolean> => {
     if (!local) return false;
     const client = clientFor(session);
     if (!client) return false;
@@ -198,31 +232,46 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     const pulled = await client.pull();
     if (pulled.status === 'unauthorized' && session.refreshToken && auth) {
       const refreshed = await refreshSession(session);
-      if (refreshed) return syncWith(local, refreshed);
+      if (refreshed) return runSync(local, refreshed);
     }
     if (pulled.status === 'not-found') {
       let created = await client.push(JSON.stringify(local), null);
       if (created.status === 'unauthorized' && session.refreshToken && auth) {
         const refreshed = await refreshSession(session);
-        if (refreshed) return syncWith(local, refreshed);
+        if (refreshed) return runSync(local, refreshed);
       }
-      if (!isCloudSuccess(created)) { setStatus('error'); setMessage(errorMessage(created)); return false; }
+      if (!isCloudSuccess(created)) return fail(created);
       await saveSyncMarker(created.version);
+      succeed();
       setStatus('synced');
       return true;
     }
-    if (!isCloudSuccess(pulled)) { setStatus('error'); setMessage(errorMessage(pulled)); return false; }
+    if (!isCloudSuccess(pulled)) return fail(pulled);
     try { decodeState(pulled.value.snapshot); }
-    catch { setStatus('error'); setMessage('The cloud copy is invalid. Your device data was not changed.'); return false; }
+    catch { return failLocally('The cloud copy is invalid. Your device data was not changed.'); }
     if (emptyWorkspace(local)) {
       const applied = await replaceRemote(pulled.value.snapshot);
-      if (!applied) { setStatus('error'); setMessage('The cloud copy could not be applied. Your device data was not changed.'); return false; }
-      await saveSyncMarker(pulled.version); setStatus('synced');
+      if (!applied) return failLocally('The cloud copy could not be applied. Your device data was not changed.');
+      await saveSyncMarker(pulled.version); succeed(); setStatus('synced');
       return true;
     }
-    if (sameSnapshot(local, pulled.value.snapshot)) { await saveSyncMarker(pulled.version); setStatus('synced'); return true; }
+    if (sameSnapshot(local, pulled.value.snapshot)) { await saveSyncMarker(pulled.version); succeed(); setStatus('synced'); return true; }
     return applyMerge(local, session, pulled.value, pulled.version, 1);
-  }, [applyMerge, auth, clientFor, refreshSession, replaceRemote, saveSyncMarker]);
+  }, [applyMerge, auth, clientFor, fail, failLocally, refreshSession, replaceRemote, saveSyncMarker, succeed]);
+
+  /**
+   * The only entry point to a sync. Concurrent callers join the run already in flight rather than
+   * starting a second one: the initial sync, the periodic tick, a scheduled retry and the Sync
+   * button can easily coincide, and two pull/merge/push cycles racing each other would lose the
+   * compare-and-swap in turn and manufacture the very conflicts the retry exists to survive.
+   */
+  const syncWith = useCallback((local: AppState | null, session: CloudSession): Promise<boolean> => {
+    const running = inFlightRef.current;
+    if (running) return running;
+    const run = runSync(local, session).finally(() => { inFlightRef.current = null; });
+    inFlightRef.current = run;
+    return run;
+  }, [runSync]);
 
   const signIn = useCallback(async (email: string, password: string) => {
     if (!config || !auth) { setStatus('disabled'); setMessage('Cloud sync is not configured for this build.'); return false; }
@@ -297,7 +346,9 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     return { ok: true, message: 'Your account has been deleted.' };
   }, [auth, clearSession, config, sessionStore]);
 
-  const syncNow = useCallback(() => {
+  /** A sync the app decided to run: the periodic tick and the scheduled retry. Leaves the backoff
+   * alone, so repeated automatic failures keep spacing themselves out. */
+  const syncTick = useCallback(() => {
     const accessError = proAccessReason(access, 'cloud sync');
     if (accessError) { setMessage(`${accessError} Your local data is safe on this device.`); return Promise.resolve(false); }
     const session = sessionRef.current;
@@ -305,6 +356,15 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     if (!session) { setStatus('signed-out'); setMessage('Sign in to sync this device.'); return Promise.resolve(false); }
     return syncWith(state, session);
   }, [access, config, state, syncWith]);
+
+  /** A sync the user asked for. Pressing Sync is a statement that something has changed — usually
+   * that they are back online — so it starts from the shortest delay again instead of honouring a
+   * backoff they cannot see. */
+  const syncNow = useCallback(() => {
+    retryRef.current = afterWake();
+    setRetry(noRetry);
+    return syncTick();
+  }, [syncTick]);
 
   // Authentication is needed before RevenueCat can bind the subscription to the Supabase UUID.
   // Once that separate check resolves to Pro, perform the first sync exactly once for this user.
@@ -319,11 +379,29 @@ export function useCloudSync(state: AppState | null, dispatch: (action: Action) 
     void syncWith(state, current);
   }, [state, isPro, entitlementResolving, syncWith]);
 
+  // Two schedules in one timer: the steady tick while everything is healthy, and the backoff after
+  // a failure. The old version only ran from the synced state, which meant one dropped connection
+  // stopped cloud sync until the user noticed and pressed Sync — on a phone, that could be days.
   useEffect(() => {
-    if (!state || !sessionRef.current || status !== 'synced') return;
-    const timer = setTimeout(() => { void syncNow(); }, 30_000);
+    if (!state || !sessionRef.current || !isPro) return;
+    const delay = status === 'synced' ? 30_000 : msUntilDue(retry, new Date());
+    if (delay === null) return;
+    const timer = setTimeout(() => { void syncTick(); }, delay);
     return () => clearTimeout(timer);
-  }, [state, status, syncNow]);
+  }, [state, status, retry, isPro, syncTick]);
+
+  // Coming back to the app is the strongest signal available that the network may be back — timers
+  // are throttled in the background, so without this a device that failed while backgrounded would
+  // wait out a stale schedule before trying.
+  useEffect(() => {
+    const listener = DeviceAppState.addEventListener('change', value => {
+      if (value !== 'active' || !sessionRef.current || !isPro) return;
+      retryRef.current = afterWake();
+      setRetry(noRetry);
+      void syncTick();
+    });
+    return () => listener.remove();
+  }, [isPro, syncTick]);
 
   // Uploads/deletes queued while offline (or before sign-in) are recorded durably in
   // attachmentSync's outbox; this drains it once the account snapshot itself is synced,
