@@ -84,4 +84,11 @@ describe('ai assist client', () => {
     const result = await client.request(payload);
     expect(result.status).toBe('server-error');
   });
+
+  it('surfaces the quota message from a 429 verbatim, so the user sees when they can try again', async () => {
+    const fetch = vi.fn(async () => response(JSON.stringify({ error: "You've used today's AI requests. They reset in about 5 hours." }), 429, { 'Retry-After': '18000' }));
+    const client = createAiClient({ url: 'https://project.supabase.co', fetch });
+    const result = await client.request(payload);
+    expect(result).toMatchObject({ status: 'server-error', httpStatus: 429, message: "You've used today's AI requests. They reset in about 5 hours." });
+  });
 });

@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { getCoachingAdvice } from '../../../src/domain/engine';
 import { badges, type Badge } from '../../../src/domain/badges';
@@ -11,6 +11,8 @@ import {
   type ReminderEffectiveness,
 } from '../../../src/domain/insights';
 import type { Blocker, Personality, Project, Task } from '../../../src/domain/types';
+import type { AiPayload } from '../../../src/domain/aiPayload';
+import { parseFirstStep, type FirstStep } from '../../../src/domain/aiResponse';
 import type { AiAssistState } from '../cloud/useAiAssist';
 import { Button, Choice } from '../components/ui';
 import { colors, radii, spacing } from '../theme';
@@ -33,6 +35,8 @@ interface Props {
   defaultFocusMinutes: number;
   onStartFocus: (id: string) => void;
   onAddTask: () => void;
+  /** Appends AI-suggested steps as subtasks of the given task. */
+  onAddSteps: (taskId: string, steps: string[]) => void;
   ai: AiAssistState;
 }
 
@@ -63,21 +67,51 @@ function reminderNote(effectiveness: ReminderEffectiveness): string | null {
   return `${percent}% of reminders were followed by getting the task done.`;
 }
 
-export function CoachScreen({ personality, nextTask, tasks, projects, openTasks, now, defaultFocusMinutes, onStartFocus, onAddTask, ai }: Props) {
+export function CoachScreen({ personality, nextTask, tasks, projects, openTasks, now, defaultFocusMinutes, onStartFocus, onAddTask, onAddSteps, ai }: Props) {
   const [blocker, setBlocker] = useState<Blocker>('start');
   const advice = getCoachingAdvice(blocker, personality);
   const [planBusy, setPlanBusy] = useState(false);
   const [planError, setPlanError] = useState('');
   const [plan, setPlan] = useState('');
+  const [stepBusy, setStepBusy] = useState(false);
+  const [stepError, setStepError] = useState('');
+  const [firstStep, setFirstStep] = useState<FirstStep | null>(null);
+
+  // A suggestion belongs to one task and one blocker; switching either makes it stale.
+  useEffect(() => { setFirstStep(null); setStepError(''); }, [blocker, nextTask?.id]);
+
+  // The breakdown is only offered to a task with no steps of its own — never mixed into a list the user wrote.
+  const canAddSteps = !!firstStep && firstStep.steps.length > 0 && !(nextTask?.subtasks?.length);
+
+  function getFirstStep() {
+    if (!nextTask) return;
+    const payload = ai.prepare('first-step', { task: nextTask, blocker }, new Date(now));
+    if (!payload) { setStepError('This task needs a title first.'); return; }
+    setStepError('');
+    ai.confirm(payload, () => void runFirstStep(payload));
+  }
+
+  async function runFirstStep(payload: AiPayload) {
+    setStepBusy(true); setStepError('');
+    const result = await ai.send(payload);
+    setStepBusy(false);
+    if (result.status !== 'success') { setStepError(result.message); return; }
+    const parsed = parseFirstStep(result.value.text);
+    if (!parsed) { setStepError('The AI didn’t come back with a clear step. Try again.'); return; }
+    setFirstStep(parsed);
+  }
+
+  function addSuggestedSteps() {
+    if (!nextTask || !firstStep) return;
+    onAddSteps(nextTask.id, firstStep.steps);
+    setFirstStep({ ...firstStep, steps: [] });
+  }
 
   function planTodayWithAi() {
     const payload = ai.prepare('daily-plan', openTasks, new Date(now));
     if (!payload) { setPlanError('Add a task with a title first.'); return; }
     setPlanError(''); setPlan('');
-    Alert.alert('Send to AI?', ai.describe(payload), [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Send', onPress: () => void runPlanToday() },
-    ]);
+    ai.confirm(payload, () => void runPlanToday());
   }
 
   async function runPlanToday() {
@@ -99,10 +133,26 @@ export function CoachScreen({ personality, nextTask, tasks, projects, openTasks,
   const hasHistory = stats.completed > 0;
 
   return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-    <Text style={styles.eyebrow}>ON-DEVICE COACHING</Text>
+    <Text style={styles.eyebrow}>COACHING</Text>
     <Text style={styles.hero}>What’s in the way?</Text>
     <Text style={styles.body}>Let’s make the next step smaller.</Text>
     <View style={styles.wrap}>{blockers.map(item => <Choice key={item.id} label={item.label} selected={blocker === item.id} onPress={() => setBlocker(item.id)} />)}</View>
+    {nextTask ? <View style={[styles.card, styles.stuckCard]}>
+      <Text style={styles.accentLabel}>STUCK ON</Text>
+      <Text style={styles.cardTitle}>{nextTask.title}</Text>
+      {firstStep ? <>
+        <Text style={styles.body}>Try this, right now:</Text>
+        <Text style={styles.stepText}>{firstStep.step}</Text>
+        <Button icon="play" label={`Start ${defaultFocusMinutes} minutes on it`} onPress={() => onStartFocus(nextTask.id)} />
+        {canAddSteps ? <Button quiet icon="list-outline" label={`Add ${firstStep.steps.length} steps to finish it`} onPress={addSuggestedSteps} /> : null}
+        <Button quiet label="Suggest something else" disabled={stepBusy} onPress={getFirstStep} />
+      </> : <>
+        <Text style={styles.body}>AI reads this task and suggests one specific thing you can start in the next five minutes.</Text>
+        <Button icon="sparkles-outline" label={stepBusy ? 'Thinking…' : 'Get a first step'} disabled={!ai.available || stepBusy} onPress={getFirstStep} />
+        {!ai.available ? <Text style={styles.caption}>{ai.unavailableReason}</Text> : null}
+      </>}
+      {stepError ? <Text style={styles.error}>{stepError}</Text> : null}
+    </View> : null}
     <View style={styles.card}>
       <Ionicons name="sparkles-outline" color={colors.accent} size={28} />
       <Text style={styles.cardTitle}>{advice.title}</Text>
@@ -112,13 +162,13 @@ export function CoachScreen({ personality, nextTask, tasks, projects, openTasks,
     </View>
     <Text style={styles.caption}>
       {ai.available
-        ? "These suggestions are built in and never leave this device. AI assistance below is on: tapping “Plan today” sends only your open tasks' titles and due times, and only after you confirm."
+        ? "These suggestions are built in and never leave this device. AI assistance is on: “Get a first step” sends only that task's title, notes, open steps and what's in the way; “Plan today” sends only your open tasks' titles and due times."
         : `These suggestions are built in and never leave this device. ${ai.unavailableReason}`}
     </Text>
     {openTasks.length > 0 ? <View style={styles.card}>
       <Ionicons name="sparkles-outline" color={colors.accent} size={28} />
       <Text style={styles.cardTitle}>Plan today</Text>
-      <Text style={styles.body}>Sends only your open tasks' titles and due times to suggest a realistic order — nothing else about them, and only once you confirm.</Text>
+      <Text style={styles.body}>Sends only your open tasks' titles and due times to suggest a realistic order — nothing else about them.</Text>
       <Button quiet disabled={!ai.available || planBusy} label={planBusy ? 'Asking AI…' : 'Plan today with AI'} onPress={planTodayWithAi} />
       {!ai.available ? <Text style={styles.caption}>{ai.unavailableReason}</Text> : null}
       {planError ? <Text style={styles.error}>{planError}</Text> : null}
@@ -191,6 +241,9 @@ const styles = StyleSheet.create({
   card: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: radii.lg, padding: 20, gap: spacing.md, marginTop: 10 },
   cardTitle: { color: colors.text, fontSize: 23, lineHeight: 30, fontWeight: '600', letterSpacing: -0.5 },
   taskTitle: { color: colors.text, fontSize: 15, fontWeight: '600', lineHeight: 22 },
+  stuckCard: { backgroundColor: colors.surfaceStrong, borderColor: '#475A35' },
+  accentLabel: { color: colors.accent, fontSize: 11, letterSpacing: 1.2, fontWeight: '700' },
+  stepText: { color: colors.text, fontSize: 18, lineHeight: 26, fontWeight: '600' },
   sectionHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: spacing.xl, marginBottom: spacing.xs },
   statRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   statTile: { flexBasis: '47%', flexGrow: 1, backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: radii.md, padding: spacing.md, gap: 2 },

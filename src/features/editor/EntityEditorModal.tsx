@@ -138,18 +138,15 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
   }
 
   // Cloud AI first pass — only offered when settings.aiAssistEnabled is on (see ai.available).
-  // Shows the user exactly what would be sent (describePayload) and requires an explicit "Send"
-  // tap before anything leaves the device; the on-device suggestProjectSteps above stays as the
-  // fallback when AI is off. Reuses the same addMilestone action, never a wider one.
+  // Goes through ai.confirm (consent given once in Settings, or per request if the user asked for
+  // that); the on-device suggestProjectSteps above stays as the fallback when AI is off. Reuses the
+  // same addMilestone action, never a wider one.
   function breakdownWithAi() {
     if (!project) return;
     const payload = ai.prepare('breakdown', project, new Date(now));
     if (!payload) { setAiError('This project needs a title and due date before AI can suggest steps.'); return; }
     setAiError('');
-    Alert.alert('Send to AI?', ai.describe(payload), [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Send', onPress: () => void runAiBreakdown(payload) },
-    ]);
+    ai.confirm(payload, () => void runAiBreakdown(payload));
   }
 
   async function runAiBreakdown(payload: AiPayload) {
@@ -291,7 +288,7 @@ function EditorForm({ selection, state, saving, error, now, dispatch, onClose, a
             </View> : null}
             {isProject && project && ai.available ? <View style={styles.wrap}>
               <Button quiet icon="sparkles-outline" label={aiBusy ? 'Asking AI…' : 'Break down with AI'} disabled={aiBusy} onPress={breakdownWithAi} />
-              <Text style={styles.caption}>Shows exactly what would be sent, and asks you to confirm, before anything leaves this device.</Text>
+              <Text style={styles.caption}>Sends only this project’s title, description and days remaining.</Text>
               {aiError ? <Text style={styles.error}>{aiError}</Text> : null}
             </View> : null}
             {isProject ? <MilestoneFields value={milestones} onChange={setMilestones} /> : null}

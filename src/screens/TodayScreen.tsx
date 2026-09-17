@@ -20,7 +20,9 @@ interface Props {
   onToggleTask: (id: string) => void;
   onStartFocus: (id: string, minutes?: number) => void;
   onAddTask: () => void;
-  onOpenCoach: () => void;
+  onOpenCoach: (taskId?: string) => void;
+  /** Opens the AI brain dump. Always offered: when AI isn't available the modal explains why. */
+  onBrainDump: () => void;
 }
 
 type Row = { kind: 'task'; task: Task } | { kind: 'completed-toggle' };
@@ -51,8 +53,9 @@ export function TodayScreen(props: Props) {
         <Button icon={nextTask ? 'play' : 'add'} label={nextTask ? `Start for ${props.defaultFocusMinutes} minutes` : 'Add a task'} onPress={() => nextTask ? props.onStartFocus(nextTask.id) : props.onAddTask()} />
         {/* Optional: pick a different length instead. Still one tap for a preset. */}
         {nextTask ? <FocusDurationChips onSelect={minutes => props.onStartFocus(nextTask.id, minutes)} /> : null}
-        {nextTask ? <View style={styles.between}><Button quiet label="I’m blocked" onPress={props.onOpenCoach} /><Button quiet label="Mark done" onPress={() => props.onCompleteTask(nextTask.id)} /></View> : null}
+        {nextTask ? <View style={styles.between}><Button quiet label="I’m blocked" onPress={() => props.onOpenCoach(nextTask.id)} /><Button quiet label="Mark done" onPress={() => props.onCompleteTask(nextTask.id)} /></View> : null}
       </View>
+      <Button quiet icon="sparkles-outline" label="Too much in your head? Brain dump it" onPress={props.onBrainDump} />
       <View style={styles.sectionHead}><Text style={styles.eyebrow}>ON YOUR RADAR</Text><Text style={styles.caption}>{tasks.length} open</Text></View>
     </>}
     renderItem={({ item }) => item.kind === 'completed-toggle'

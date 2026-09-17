@@ -19,6 +19,8 @@ import { useAiAssist } from '../cloud/useAiAssist';
 import { InAppReminder } from '../features/reminders/InAppReminder';
 import { EntityEditorModal, type EditorSelection } from '../features/editor/EntityEditorModal';
 import { FocusModal } from '../features/focus/FocusModal';
+import { BrainDumpModal } from '../features/capture/BrainDumpModal';
+import { randomUUID } from 'expo-crypto';
 import { Confetti } from '../features/celebrate/Confetti';
 import { useCompletionCelebration } from '../features/celebrate/useCompletionCelebration';
 import { RecoveryActions } from '../components/RecoveryActions';
@@ -40,9 +42,14 @@ export function MobileApp() {
   const { state, error, saving, dispatch, retry, importSnapshot, replaceRemote, applyQueued } = useMobileStore();
   const [tab, setTab] = useState<TabName>('Today');
   const [editor, setEditor] = useState<EditorSelection>(null);
+  const [brainDumpOpen, setBrainDumpOpen] = useState(false);
+  // The task someone said they're blocked on — from a reminder's "I'm blocked" or Today's button —
+  // so Coach helps with that task rather than whatever happens to sort first.
+  const [coachTaskId, setCoachTaskId] = useState<string | null>(null);
   const now = useAppClock(30_000);
   const [proAccess, setProAccess] = useState<ProAccess>({ resolving: true, isPro: false });
-  const notifications = useNotifications(state, dispatch, () => setTab('Projects'), () => setTab('Coach'));
+  const openCoach = useCallback((taskId?: string) => { setCoachTaskId(taskId ?? null); setTab('Coach'); }, []);
+  const notifications = useNotifications(state, dispatch, () => setTab('Projects'), openCoach);
   const calendarSync = useCalendarSync(state, dispatch);
   const cloud = useCloudSync(state, dispatch, replaceRemote, proAccess);
   const billing = useRevenueCat(cloud.userId ?? undefined);
@@ -106,6 +113,7 @@ export function MobileApp() {
   if (!state) return <LoadingState error={error} retry={retry} restore={importSnapshot} />;
 
   const nextTask = orderedTasks[0];
+  const coachTask = openTasks.find(task => task.id === coachTaskId) ?? nextTask;
   const focusTask = state.tasks.find(task => task.id === state.focus?.taskId);
 
   const openTaskEditor = (task?: Task) => setEditor({ kind: 'task', task });
@@ -139,7 +147,8 @@ export function MobileApp() {
         onToggleTask={id => run({ type: 'toggleTask', id })}
         onStartFocus={(id, minutes) => run({ type: 'startFocus', id, minutes })}
         onAddTask={() => openTaskEditor()}
-        onOpenCoach={() => setTab('Coach')}
+        onOpenCoach={openCoach}
+        onBrainDump={() => setBrainDumpOpen(true)}
       /> : null}
       {tab === 'Tasks' ? <TasksScreen
         now={now}
@@ -158,7 +167,7 @@ export function MobileApp() {
       /> : null}
       {tab === 'Coach' ? <CoachScreen
         personality={state.settings.personality}
-        nextTask={nextTask}
+        nextTask={coachTask}
         tasks={state.tasks}
         projects={state.projects}
         openTasks={openTasks}
@@ -166,6 +175,7 @@ export function MobileApp() {
         defaultFocusMinutes={state.settings.focusMinutes ?? 5}
         onStartFocus={id => run({ type: 'startFocus', id })}
         onAddTask={() => openTaskEditor()}
+        onAddSteps={(id, steps) => { for (const title of steps) run({ type: 'addSubtask', id, subtaskId: randomUUID(), title }); }}
         ai={ai}
       /> : null}
       {tab === 'Settings' ? <SettingsScreen
@@ -180,7 +190,7 @@ export function MobileApp() {
         billing={billing}
       /> : null}
     </View>
-    <AppTabBar selected={tab} onSelect={setTab} />
+    <AppTabBar selected={tab} onSelect={next => { setCoachTaskId(null); setTab(next); }} />
     <EntityEditorModal
       selection={editor}
       state={state}
@@ -193,6 +203,7 @@ export function MobileApp() {
       ai={ai}
       isPro={billing.state.isPro}
     />
+    <BrainDumpModal visible={brainDumpOpen} now={now} ai={ai} dispatch={dispatch} onClose={() => setBrainDumpOpen(false)} />
     <FocusModal session={state.focus} task={focusTask} error={error} dispatch={dispatch} navigate={setTab} />
     {celebration ? <Confetti variant={celebration.variant} message={celebration.badge?.title} onDone={clearCelebration} /> : null}
   </SafeAreaView>;

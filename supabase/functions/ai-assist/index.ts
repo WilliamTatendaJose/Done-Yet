@@ -28,15 +28,67 @@ const MODEL = 'muse-spark-1.3-contributor';
 // finish_reason: "length" — a silent empty success. 2000 was enough to leave room for both the
 // reasoning budget and a real answer in testing; do not lower this without re-verifying live.
 const MAX_TOKENS = 2000;
+// `capture` can answer with up to 15 tasks as JSON, several times the longest plain-text answer,
+// on top of the same reasoning budget. Not yet verified live — raise it if "ran out of space" shows up.
+const CAPTURE_MAX_TOKENS = 4000;
 
 // Mirrors the caps in mobile/../src/domain/aiPayload.ts. Enforced again here because the client's
 // caps are a courtesy, not a security boundary — this function must not trust them.
-const LIMITS = { title: 200, description: 1000, sentence: 500, maxTitles: 50 } as const;
+const LIMITS = { title: 200, description: 1000, sentence: 500, maxTitles: 50, capture: 1500, notes: 1000, step: 120, maxSteps: 20 } as const;
+const BLOCKERS = { start: "they don't know where to start", overwhelmed: 'it feels too big', waiting: "they're waiting on someone else", time: "they don't have much time" } as const;
+type BlockerId = keyof typeof BLOCKERS;
+const LOCAL_NOW = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} (Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$/;
 
 type Json = Record<string, unknown>;
 
-function jsonResponse(body: Json, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+function jsonResponse(body: Json, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+}
+
+function waitLabel(seconds: number): string {
+  if (seconds < 90) return `${Math.max(1, seconds)} seconds`;
+  if (seconds < 90 * 60) return `${Math.round(seconds / 60)} minutes`;
+  return `about ${Math.round(seconds / 3600)} hours`;
+}
+
+/** Identifies the counts one allowed request was added to, so a failed provider call can give exactly those back. */
+interface QuotaLease { p_owner: string; p_day_start: string; p_window_start: string }
+
+/** Spends one request from the caller's allowance. Returns the lease when allowed, otherwise the response to send instead. */
+async function consumeQuota(supabaseUrl: string, supabaseKey: string, authHeader: string): Promise<QuotaLease | Response> {
+  let outcome: unknown;
+  try {
+    const response = await fetch(`${supabaseUrl}/rest/v1/rpc/consume_ai_request`, { method: 'POST', headers: { apikey: supabaseKey, Authorization: authHeader, 'content-type': 'application/json' }, body: '{}' });
+    if (!response.ok) throw new Error('quota check failed');
+    outcome = await response.json();
+  } catch {
+    return jsonResponse({ error: 'AI assistance is temporarily unavailable. Try again shortly.' }, 503);
+  }
+  const q = (outcome ?? {}) as Json;
+  if (q.allowed === true) {
+    if (!isString(q.owner_id) || !isString(q.day_start) || !isString(q.window_start)) return jsonResponse({ error: 'AI assistance is temporarily unavailable. Try again shortly.' }, 503);
+    return { p_owner: q.owner_id, p_day_start: q.day_start, p_window_start: q.window_start };
+  }
+  const retryAfter = typeof q.retry_after === 'number' && Number.isFinite(q.retry_after) ? Math.max(1, Math.ceil(q.retry_after)) : 60;
+  const error = q.reason === 'daily'
+    ? `You've used today's AI requests. More are available in ${waitLabel(retryAfter)}.`
+    : q.reason === 'burst'
+      ? `That's a lot of AI requests at once. Try again in ${waitLabel(retryAfter)}.`
+      : 'AI assistance is not available for this account right now.';
+  return jsonResponse({ error }, 429, { 'Retry-After': String(retryAfter) });
+}
+
+/**
+ * Gives a request back after the provider failed, so an outage doesn't eat the user's allowance.
+ * Needs the service role (refund_ai_request is not callable by users, or they could refund
+ * everything). Best effort: a failed refund only means the user was charged for a failed request.
+ */
+async function refundQuota(supabaseUrl: string, lease: QuotaLease): Promise<void> {
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!serviceKey) return;
+  try {
+    await fetch(`${supabaseUrl}/rest/v1/rpc/refund_ai_request`, { method: 'POST', headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'content-type': 'application/json' }, body: JSON.stringify(lease) });
+  } catch { /* best effort — see above */ }
 }
 
 function badRequest(message: string): Response {
@@ -50,7 +102,9 @@ const sameKeys = (keys: string[], allowed: string[]) => keys.length === allowed.
 interface ValidBreakdown { task: 'breakdown'; title: string; description: string; daysRemaining: number }
 interface ValidProgressParse { task: 'progress-parse'; sentence: string }
 interface ValidDailyPlan { task: 'daily-plan'; titles: string[]; times: string[] }
-type Valid = ValidBreakdown | ValidProgressParse | ValidDailyPlan;
+interface ValidCapture { task: 'capture'; text: string; localNow: string }
+interface ValidFirstStep { task: 'first-step'; title: string; notes: string; openSteps: string[]; blocker: BlockerId }
+type Valid = ValidBreakdown | ValidProgressParse | ValidDailyPlan | ValidCapture | ValidFirstStep;
 
 /**
  * Strict allow-list validation per task type. Any extra key, missing key, wrong type, or
@@ -61,7 +115,7 @@ type Valid = ValidBreakdown | ValidProgressParse | ValidDailyPlan;
 function validate(body: unknown): Valid | string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Request body must be a JSON object.';
   const { task, fields } = body as Json;
-  if (task !== 'breakdown' && task !== 'progress-parse' && task !== 'daily-plan') return 'Unknown or missing task.';
+  if (task !== 'breakdown' && task !== 'progress-parse' && task !== 'daily-plan' && task !== 'capture' && task !== 'first-step') return 'Unknown or missing task.';
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return 'Missing fields object.';
   const f = fields as Json;
   const keys = Object.keys(f);
@@ -78,6 +132,22 @@ function validate(body: unknown): Valid | string {
     if (!sameKeys(keys, ['sentence'])) return 'progress-parse requires exactly sentence.';
     if (!isString(f.sentence) || !f.sentence.trim() || f.sentence.length > LIMITS.sentence) return 'Invalid sentence.';
     return { task, sentence: f.sentence };
+  }
+
+  if (task === 'capture') {
+    if (!sameKeys(keys, ['text', 'localNow'])) return 'capture requires exactly text, localNow.';
+    if (!isString(f.text) || !f.text.trim() || f.text.length > LIMITS.capture) return 'Invalid text.';
+    if (!isString(f.localNow) || !LOCAL_NOW.test(f.localNow)) return 'Invalid localNow.';
+    return { task, text: f.text, localNow: f.localNow };
+  }
+
+  if (task === 'first-step') {
+    if (!sameKeys(keys, ['title', 'notes', 'openSteps', 'blocker'])) return 'first-step requires exactly title, notes, openSteps, blocker.';
+    if (!isString(f.title) || !f.title.trim() || f.title.length > LIMITS.title) return 'Invalid title.';
+    if (!isString(f.notes) || f.notes.length > LIMITS.notes) return 'Invalid notes.';
+    if (!isStringArray(f.openSteps) || f.openSteps.length > LIMITS.maxSteps || f.openSteps.some(s => !s.trim() || s.length > LIMITS.step)) return 'Invalid openSteps.';
+    if (!isString(f.blocker) || !Object.hasOwn(BLOCKERS, f.blocker)) return 'Invalid blocker.';
+    return { task, title: f.title, notes: f.notes, openSteps: f.openSteps, blocker: f.blocker as BlockerId };
   }
 
   // daily-plan
@@ -103,6 +173,33 @@ function promptFor(v: Valid): string {
       + `Estimate how complete the project sounds as a single whole percent from 0 to 100. `
       + `Reply with only the number, no percent sign, no words.`;
   }
+  if (v.task === 'capture') {
+    return `Turn this brain dump into separate to-do tasks.\n`
+      + `The person's current local date and time: ${v.localNow}\n`
+      + `Brain dump:\n"""\n${v.text}\n"""\n\n`
+      + `Reply with ONLY a JSON object, no markdown fences and no commentary, in exactly this shape:\n`
+      + `{"tasks":[{"title":"...","due":null,"priority":"medium","tags":[],"steps":[]}]}\n\n`
+      + `Rules:\n`
+      + `- One task per distinct thing to do. Never invent tasks that are not in the text.\n`
+      + `- "title": a short action starting with a verb, under 12 words, in the person's language.\n`
+      + `- "due": "YYYY-MM-DDTHH:mm" when a date and time are given, "YYYY-MM-DD" when only a day is given, `
+      + `otherwise null. Resolve words like "tomorrow", "Friday" or "next week" against the current local date. Never pick a time that was not stated.\n`
+      + `- "priority": "high" only for urgent or important language, "low" for "someday" or "if I get time", otherwise "medium".\n`
+      + `- "tags": at most 2 short lowercase words, only when an obvious category applies; otherwise [].\n`
+      + `- "steps": only when the text says a task is big or has several parts, 3 to 6 short steps; otherwise [].`;
+  }
+  if (v.task === 'first-step') {
+    return `Someone is stuck on a task and needs one tiny, specific way to begin.\n`
+      + `Task: ${v.title}\n`
+      + `Notes: ${v.notes || '(none)'}\n`
+      + `Steps they have already listed: ${v.openSteps.length ? v.openSteps.join('; ') : '(none)'}\n`
+      + `What is in the way: ${BLOCKERS[v.blocker]}\n\n`
+      + `Reply with ONLY a JSON object, no markdown fences and no commentary: {"step":"...","steps":[]}\n`
+      + `- "step": one concrete physical action for THIS task that can be started right now and done in 5 minutes, `
+      + `under 20 words, starting with a verb. Not generic advice like "set a timer" or "break it down". `
+      + `If they are waiting on someone, choose something they can do without that person.\n`
+      + `- "steps": only if no steps are listed and the task is too big for one sitting, 3 to 6 short steps to finish it; otherwise [].`;
+  }
   const lines = v.titles.map((title, i) => `- ${title}${v.times[i] ? ` (due ${v.times[i]})` : ''}`).join('\n');
   return `Here are today's tasks:\n${lines}\n\n`
     + `Suggest a short, realistic order to tackle them today, as 3 to 6 sentences of plain prose. `
@@ -112,13 +209,13 @@ function promptFor(v: Valid): string {
 type MuseOutcome = { text: string; usage?: { completionTokens?: number; reasoningTokens?: number } } | { error: string; status: number };
 
 /** Calls the provider and turns its response into either the generated text or a specific, actionable error. Never returns an empty success. */
-async function callMuse(prompt: string, apiKey: string): Promise<MuseOutcome> {
+async function callMuse(prompt: string, apiKey: string, maxTokens: number): Promise<MuseOutcome> {
   let response: Response;
   try {
     response = await fetch(MUSE_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, max_tokens: MAX_TOKENS, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
     });
   } catch {
     return { error: 'The AI provider could not be reached. Try again shortly.', status: 502 };
@@ -183,10 +280,19 @@ Deno.serve(async (req: Request) => {
   const validated = validate(body);
   if (typeof validated === 'string') return badRequest(validated);
 
+  // Quota (see migrations/202609170001_ai_usage.sql): counted only for a request that is valid and
+  // about to reach the provider, with the caller's own token so it can only ever spend their own
+  // allowance. Fails closed — if the quota can't be checked, the provider is not called.
+  const lease = await consumeQuota(supabaseUrl, supabaseKey, authHeader);
+  if (lease instanceof Response) return lease;
+
   // Never log the request body, the built prompt, or the key.
   const prompt = promptFor(validated);
-  const result = await callMuse(prompt, apiKey);
-  if ('error' in result) return jsonResponse({ error: result.error }, result.status);
+  const result = await callMuse(prompt, apiKey, validated.task === 'capture' ? CAPTURE_MAX_TOKENS : MAX_TOKENS);
+  if ('error' in result) {
+    await refundQuota(supabaseUrl, lease);
+    return jsonResponse({ error: result.error }, result.status);
+  }
 
   return jsonResponse({ text: result.text, usage: result.usage });
 });

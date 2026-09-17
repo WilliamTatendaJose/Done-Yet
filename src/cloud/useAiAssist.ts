@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
+import { Alert } from 'react-native';
 import type { AiPayload, AiTask } from '../../../src/domain/aiPayload';
-import { buildPayload, describePayload } from '../../../src/domain/aiPayload';
+import { aiAssistConsented, aiConsentOutdated, buildPayload, describePayload } from '../../../src/domain/aiPayload';
 import type { AppState } from '../../../src/domain/types';
 import { createAiClient } from './aiAssist';
 import { getSupabaseConfig } from './config';
@@ -15,11 +16,14 @@ export interface AiAssistState {
   /** Calm, user-facing reason AI assistance can't be used right now; '' when `available` is true. */
   unavailableReason: string;
   /** Builds the minimised request for `task`, or null when `input` can't be minimised (see
-   * domain/aiPayload.ts). Pure — makes no request. Callers must show `describe(payload)` and get
-   * an explicit tap before ever calling `send`. */
+   * domain/aiPayload.ts). Pure — makes no request. Callers go through `confirm` before `send`. */
   prepare(task: AiTask, input: unknown, now?: Date): AiPayload | null;
   /** Exactly what `send(payload)` would transmit, in plain language, for a confirmation prompt. */
   describe(payload: AiPayload): string;
+  /** The single gate between a tap and `send`. Consent is given once, when AI assistance is turned on
+   * in Settings, so this calls `onSend` straight away — unless the user opted in to
+   * `settings.aiConfirmEachRequest`, in which case it first shows `describe(payload)` and waits for "Send". */
+  confirm(payload: AiPayload, onSend: () => void): void;
   /** Sends `payload` — and only `payload` — to the ai-assist Edge Function. */
   send(payload: AiPayload): Promise<CloudResult<{ text: string }>>;
 }
@@ -32,15 +36,19 @@ export interface AiAssistState {
  */
 export function useAiAssist(state: AppState | null, signedIn: boolean, access: ProAccess, token: CloudTokenProvider): AiAssistState {
   const config = useMemo(() => getSupabaseConfig(), []);
-  const enabled = !!state?.settings.aiAssistEnabled;
+  const enabled = !!state && aiAssistConsented(state.settings);
+  const outdatedConsent = !!state && aiConsentOutdated(state.settings);
+  const askEachTime = !!state?.settings.aiConfirmEachRequest;
   const available = enabled && !!config && signedIn && !access.resolving && access.isPro;
-  const unavailableReason = !enabled
-    ? 'Turn on AI assistance in Settings to use this.'
-    : !config
-      ? 'Cloud is not configured for this build.'
-      : !signedIn
-        ? 'Sign in to cloud sync in Settings to use AI assistance.'
-        : proAccessReason(access, 'AI assistance');
+  // Ordered by what the user has to do first: sign in, then Pro (purchase needs an account), then the
+  // setting — which Settings only lets a Pro user turn on, so asking for it earlier would be a dead end.
+  const unavailableReason = !config
+    ? 'Cloud is not configured for this build.'
+    : !signedIn
+      ? 'Sign in to cloud sync in Settings to use AI assistance.'
+      : proAccessReason(access, 'AI assistance') || (outdatedConsent
+        ? 'AI assistance has new features. Review what they send and turn it on again in Settings.'
+        : !enabled ? 'Turn on AI assistance in Settings to use this.' : '');
   const client = useMemo(() => config ? createAiClient({ url: config.url, apiKey: config.anonKey, token }) : null, [config, token]);
 
   return {
@@ -48,6 +56,13 @@ export function useAiAssist(state: AppState | null, signedIn: boolean, access: P
     unavailableReason,
     prepare: (task, input, now = new Date()) => buildPayload(task, input, now),
     describe: describePayload,
+    confirm(payload, onSend) {
+      if (!askEachTime) { onSend(); return; }
+      Alert.alert('Send to AI?', describePayload(payload), [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Send', onPress: onSend },
+      ]);
+    },
     async send(payload) {
       if (!available || !client) return { status: 'request-error', message: unavailableReason || 'AI assistance is not available.' };
       return client.request(payload);

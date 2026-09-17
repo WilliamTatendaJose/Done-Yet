@@ -7,7 +7,7 @@ import { reconcileNotifications, responseAction } from './native';
 
 export type NotificationDeliveryStatus = 'disabled' | 'checking' | 'available' | 'unavailable';
 
-export function useNotifications(state: AppState | null, dispatch: (a: Action) => Promise<boolean>, openProject: () => void, openCoach: () => void = () => {}) {
+export function useNotifications(state: AppState | null, dispatch: (a: Action) => Promise<boolean>, openProject: () => void, openCoach: (taskId?: string) => void = () => {}) {
   const [error, setError] = useState('');
   const [count, setCount] = useState(0);
   const [refresh, setRefresh] = useState(0);
@@ -51,7 +51,7 @@ export function useNotifications(state: AppState | null, dispatch: (a: Action) =
       if (saved) {
         Notifications.clearLastNotificationResponse();
         if (data.owner === 'done-yet' && data.kind === 'project') current.current.openProject();
-        if (data.owner === 'done-yet' && data.kind === 'task' && response.actionIdentifier === 'BLOCKED') current.current.openCoach();
+        if (data.owner === 'done-yet' && data.kind === 'task' && response.actionIdentifier === 'BLOCKED') current.current.openCoach(typeof data.entityId === 'string' ? data.entityId : undefined);
       } else handling.current.delete(id);
     };
     const listener = Notifications.addNotificationResponseReceivedListener(response => { void handle(response); });

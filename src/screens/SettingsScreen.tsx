@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import type { AppState, ReminderLevel } from '../../../src/domain/types';
 import { intervals } from '../../../src/domain/engine';
+import { AI_CONSENT_VERSION, aiAssistConsented, aiConsentOutdated } from '../../../src/domain/aiPayload';
 import { ReleaseSettings } from '../components/ReleaseSettings';
 import { CloudSyncSettings } from '../components/CloudSyncSettings';
 import type { CloudSyncState } from '../cloud/useCloudSync';
@@ -21,6 +22,9 @@ const levels: ReminderLevel[] = ['gentle', 'persistent', 'firm', 'relentless'];
 // intervalText is derived from the single interval table in src/domain/engine.ts, never a second copy.
 const intervalText: Record<ReminderLevel, string> = Object.fromEntries(levels.map(l => [l, `${intervals[l]} min`])) as Record<ReminderLevel, string>;
 
+/** What each AI action sends, in one place, so the Settings copy and the turn-on consent can't drift apart. Mirrors domain/aiPayload.ts. */
+const AI_DISCLOSURE = 'a brain dump sends only the text you typed and today’s date and time; a first step sends only that task’s title, notes, unfinished steps and what’s in the way; breaking a project into steps sends only its title, description and days remaining; reading a status update sends only the sentence you typed; planning today sends only your open tasks’ titles and due times. Nothing else — no ids, tags, attachments or history — is ever included.';
+
 interface Props {
   state: AppState;
   saving: boolean;
@@ -35,6 +39,22 @@ interface Props {
 
 export function SettingsScreen({ state, saving, notificationCount, onSettingsChange, onImportSnapshot, cloud, escalationSuggestions, onApplyEscalation, billing }: Props) {
   const [accountOpen, setAccountOpen] = useState(false);
+  const aiOn = aiAssistConsented(state.settings) && billing.state.isPro;
+
+  // Consent is given here, once, rather than on every AI request: turning it on spells out exactly what
+  // each action sends and needs an explicit "Turn on". Turning it off never asks.
+  function setAiAssist(value: boolean) {
+    if (!value) { void onSettingsChange({ aiAssistEnabled: false }); return; }
+    Alert.alert(
+      'Turn on AI assistance?',
+      `AI actions send a small request to an AI service through your account, only when you tap them. ${AI_DISCLOSURE.charAt(0).toUpperCase()}${AI_DISCLOSURE.slice(1)}\n\nYou can turn on "Ask before each AI request" to review every one, or turn AI off at any time.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Turn on', onPress: () => { void onSettingsChange({ aiAssistEnabled: true, aiConsentVersion: AI_CONSENT_VERSION }); } },
+      ],
+    );
+  }
+
   return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
     <Text style={styles.eyebrow}>YOU SET THE PACE</Text>
     <Text style={styles.hero}>On your terms.</Text>
@@ -84,18 +104,21 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
       <View style={styles.settingCopy}>
         <Text style={styles.taskTitle}>AI assistance (cloud)</Text>
         <Text style={styles.small}>
-          A Pro feature, off by default. When you turn this on, three specific actions you tap for yourself can
-          send a small, fixed request to an AI service: breaking a project into steps sends only its
-          title, description and days remaining; reading a status update sends only the sentence you
-          typed; planning today sends only your open tasks' titles and due times. Nothing else about
-          a task or project — no notes, ids, tags or history — is ever included, and every one of
-          those requests shows you exactly what it would send and waits for you to confirm before
-          anything leaves this device. Requires being signed in to cloud sync, since the request goes
-          through your account. Turning this off again stops all of it immediately.
+          A Pro feature, off by default. Nothing is sent until you tap an AI action, and each one sends
+          only a small, fixed request: {AI_DISCLOSURE} Requires being signed in to cloud sync, since the
+          request goes through your account. Turning this off again stops all of it immediately.
         </Text>
+        {aiConsentOutdated(state.settings) && billing.state.isPro ? <Text style={styles.small}>AI assistance has new features since you turned it on, so it's paused. Review what each one sends above, then turn it on again.</Text> : null}
       </View>
-      <Switch accessibilityLabel="AI assistance (cloud)" disabled={!billing.state.isPro} value={!!state.settings.aiAssistEnabled && billing.state.isPro} onValueChange={value => { void onSettingsChange({ aiAssistEnabled: value }); }} trackColor={{ true: colors.accent }} thumbColor={colors.text} />
+      <Switch accessibilityLabel="AI assistance (cloud)" disabled={!billing.state.isPro} value={aiOn} onValueChange={setAiAssist} trackColor={{ true: colors.accent }} thumbColor={colors.text} />
     </View>
+    {aiOn ? <View style={styles.settingRow}>
+      <View style={styles.settingCopy}>
+        <Text style={styles.taskTitle}>Ask before each AI request</Text>
+        <Text style={styles.small}>Off by default. When on, every AI action first shows exactly what it would send and waits for you to tap Send.</Text>
+      </View>
+      <Switch accessibilityLabel="Ask before each AI request" value={!!state.settings.aiConfirmEachRequest} onValueChange={value => { void onSettingsChange({ aiConfirmEachRequest: value }); }} trackColor={{ true: colors.accent }} thumbColor={colors.text} />
+    </View> : null}
     <Field label="Coach personality">
       <View style={styles.wrap}>{(['supportive', 'direct', 'minimal'] as const).map(personality => <Choice key={personality} label={personality} selected={state.settings.personality === personality} onPress={() => { void onSettingsChange({ personality }); }} />)}</View>
     </Field>
@@ -105,8 +128,8 @@ export function SettingsScreen({ state, saving, notificationCount, onSettingsCha
       <Text style={styles.body}>
         Tasks are stored on this phone first. Cloud sync is optional and only sends your snapshot
         after you sign in. Duration estimates and on-device step suggestions run on this device and
-        are never sent anywhere. AI assistance above is {state.settings.aiAssistEnabled
-          ? 'on — the three actions described above can send the small, fixed requests noted there, only when you tap them and only after you confirm'
+        are never sent anywhere. AI assistance above is {aiOn
+          ? `on — the AI actions described above send the small, fixed requests noted there, only when you tap them${state.settings.aiConfirmEachRequest ? ' and only after you confirm' : ''}`
           : 'off — no task or project details reach any AI service'}.
       </Text>
     </View>

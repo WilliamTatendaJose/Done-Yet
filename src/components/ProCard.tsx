@@ -7,7 +7,7 @@ export function ProCard({ billing }: { billing: RevenueCatClient }) {
   const { state } = billing;
   return <View style={styles.card}>
     <Text style={styles.title}>{state.developerOverride ? 'Done Yet? Pro · Developer override' : state.isPro ? 'Done Yet? Pro' : 'Unlock Done Yet? Pro'}</Text>
-    <Text style={styles.body}>{state.developerOverride ? 'Paid features are unlocked locally for development. Production builds always require a real entitlement.' : state.isPro ? 'Cloud sync, AI assistance and unlimited attachments are active.' : 'Cloud sync, AI assistance and unlimited attachments. Local features stay free.'}</Text>
+    <Text style={styles.body}>{state.developerOverride ? 'Paid features are unlocked locally for development. Production builds always require a real entitlement.' : state.isPro ? 'AI brain dump, AI first steps when you’re stuck, cloud sync and unlimited attachments are active.' : 'Dump everything on your mind and AI turns it into tasks. Stuck? AI gives you a first step you can start in five minutes. Plus cloud sync and unlimited attachments. Local features stay free.'}</Text>
     {!state.isPro ? state.packages.map(plan => (
       <Button
         key={plan.identifier}

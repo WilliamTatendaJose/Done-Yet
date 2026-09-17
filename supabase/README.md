@@ -119,8 +119,8 @@ through their current expiration. `EXPIRATION` revokes access.
 
 ## Cloud AI assistance
 
-Cloud AI assistance is an Edge Function, `mobile/supabase/functions/ai-assist`, that proxies three
-narrow requests (`breakdown`, `progress-parse`, `daily-plan`) to the Muse provider
+Cloud AI assistance is an Edge Function, `mobile/supabase/functions/ai-assist`, that proxies five
+narrow requests (`breakdown`, `progress-parse`, `daily-plan`, `capture`, `first-step`) to the Muse provider
 (`https://api.meta.ai/v1/chat/completions`, model `muse-spark-1.3-contributor`). **The provider key
 lives only in this function** — it is read server-side via `Deno.env.get('MUSE_API_KEY')`, is never
 embedded in the app, never has an `EXPO_PUBLIC_` counterpart, and never appears anywhere in this
@@ -140,19 +140,51 @@ independently re-validates an exact allow-list of fields per task, rejecting any
 extra, missing, or over-limit field with a 400: `breakdown` accepts only `title` (≤200 chars),
 `description` (≤1000 chars) and `daysRemaining`; `progress-parse` accepts only `sentence` (≤500
 chars); `daily-plan` accepts only `titles` (≤50 entries, each ≤200 chars) and a matching `times`
-array. The actual prompt sent to the provider is built entirely server-side from those validated
-fields — the client never supplies, and the function never accepts, a ready-made prompt.
+array; `capture` accepts only `text` (≤1500 chars) and `localNow` (`YYYY-MM-DD HH:mm Weekday`);
+`first-step` accepts only `title` (≤200 chars), `notes` (≤1000 chars), `openSteps` (≤20 entries, each
+≤120 chars) and `blocker` (one of `start`, `overwhelmed`, `waiting`, `time`). The actual prompt sent
+to the provider is built entirely server-side from those validated
+fields — the client never supplies, and the function never accepts, a ready-made prompt. `capture` and
+`first-step` ask for a JSON object; the app parses and validates it (`domain/aiResponse.ts`) and only
+ever proposes the result — nothing is written until the user accepts it.
 
 The provider is a **reasoning model**: even a trivial prompt consumes real "thinking" tokens before
 any visible output, and a too-small `max_tokens` produces an HTTP 200 with `content: null` and
 `finish_reason: "length"` — a silent empty success. The function calls it with `max_tokens: 2000`
+(4000 for `capture`, whose JSON answer is longer — not yet verified live)
 and treats `content == null` or `finish_reason === "length"` as a specific, actionable error, never
 as an empty success. It logs neither the request body, the prompt it builds, nor the key.
 
-Before enabling a production build, verify: a request with no `Authorization` header is refused
-with 401; a request with an extra or missing field for its task is refused with 400 and does not
-reach the provider; and a request that would exceed the reasoning model's token budget surfaces a
-clear error rather than an empty response.
+### Request quota
+
+Each account is limited to **10 AI requests per minute and 100 per 24 hours** (a window that opens
+with the first request, not a reset at a fixed hour in some timezone). The counters live in
+`public.ai_usage`, created by `202609170001_ai_usage.sql` — apply it with `supabase db push` before
+deploying the function, or every AI request will fail with 503. After a request passes validation and
+before the provider is called, the function calls the zero-parameter `consume_ai_request()` with the
+caller's own JWT; it row-locks that account's counter, so concurrent requests are counted one at a
+time. The limits are constants in the SQL function (not parameters), and `ai_usage` has RLS on with
+no grants, so a user calling the RPC directly can only spend their own allowance. Over the limit, the
+function returns 429 with a `Retry-After` header and a message the app shows as-is ("They reset in
+about 5 hours"). If the quota check itself fails, the function fails closed with 503 rather than
+calling the provider unmetered. If the provider call fails after the request was counted, the
+function gives it back through `refund_ai_request(owner, day_start, window_start)` using the
+service-role key (available to Edge Functions by default). That function is executable by
+`service_role` only — a user who could call it could refund every request — and only decrements a
+counter still in the window the request was counted in, never below zero. To change the limits,
+edit `per_minute` / `per_day` in a new migration.
+
+Verified live (2026-09-17, in a rolled-back transaction with a throwaway user): ten requests allowed
+and the eleventh refused as a burst with `retry_after` 60; a refund restores one request; 100 used
+in the window is refused as daily with `retry_after` ≈ 24h, and allowed again once 24 hours have
+passed; a signed-in user is denied both `select` on `ai_usage` and `refund_ai_request`; anonymous
+callers are denied `consume_ai_request`, `refund_ai_request` and `ai_usage`, and the function returns
+401 without a bearer token.
+
+Before enabling a production build, still verify end to end with a real Pro account: a request with
+an extra or missing field is refused with 400 and does not reach the provider; a request that would
+exceed the reasoning model's token budget surfaces a clear error rather than an empty response; and
+the app shows the 429 message when the limit is hit.
 
 ## Gateway API key
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Alert, StyleSheet, Text, TextInput, View } from 'react-native';
+import { StyleSheet, Text, TextInput, View } from 'react-native';
 import type { Project } from '../../../../src/domain/types';
 import { projectPacing } from '../../../../src/domain/engine';
 import { milestoneProgress } from '../../../../src/domain/milestones';
@@ -31,10 +31,7 @@ export function ProjectCard({ project, now, onEdit, onProgressChange, ai }: Prop
     const payload = ai.prepare('progress-parse', sentence, new Date(now));
     if (!payload) { setAiError('Type a short update first.'); return; }
     setAiError(''); setProposed(null);
-    Alert.alert('Send to AI?', ai.describe(payload), [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Send', onPress: () => void runReadUpdate() },
-    ]);
+    ai.confirm(payload, () => void runReadUpdate());
   }
 
   async function runReadUpdate() {
